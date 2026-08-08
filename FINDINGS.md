@@ -12,7 +12,7 @@
 | C — supervisor | **PARCIAL** | supervisor local é transiente/on-demand e `claude agents` o segura aberto; teste completo bloqueado (B1 + risco de matar sessões vivas) |
 | D — agentes de Slack | **BLOQUEADO** | depende do JSON da EC2 (B1) |
 | E — resposta inline | **FALHOU** (resultado útil) | CLI recusa com erro limpo e sugere `attach` ou `--fork-session` |
-| F — iTerm2 | **BLOQUEADO** | iTerm2 3.6.11 **instalado**; falta aprovação de Automação (TCC) na tela — AppleEvent timed out (-1712) |
+| F — iTerm2 | **OK** | F1/F2/F3 confirmados após aprovação de Automação: handle é UUID, "abrir ou focar" viável, aba fechada → `missing` limpo |
 | G — heurística de nomes | **OK** | 3/7 interativas casam o padrão; zero falsos positivos na amostra |
 
 ---
@@ -143,12 +143,23 @@ Conclusão: registrada acima. Caso claro de "não suportado por design", não de
 
 ## F. iTerm2 e AppleScript
 
-### F1–F3
-Status:   **BLOQUEADO** (atualizado: iTerm2 instalado, falta aprovação de Automação do macOS)
-Saída:    1ª rodada: iTerm2 não estava instalado (único terminal: Terminal.app). 2ª rodada: **instalado via `brew install --cask iterm2` → 3.6.11**, processo sobe normalmente. O F1, porém, falha em duas camadas:
-1. `tell application "iTerm2"` não compila logo após a instalação (`syntax error: Expected end of line but found class name`) — o LaunchServices ainda não tinha registrado o nome; **`tell application id "com.googlecode.iterm2"` resolve** e é a forma mais robusta para o tarmac usar sempre.
-2. Com o bundle id, o evento chega mas não é respondido: `execution error: iTerm got an error: AppleEvent timed out. (-1712)` — consistente com o diálogo de **Automação** do macOS (TCC) pendente na tela e/ou a janela de onboarding do primeiro launch do iTerm2 bloqueando o app. Não há como aprovar isso por linha de comando (e `osascript` também não tem acesso de assistive para clicar: erro -25211 registrado).
-Conclusão: F1–F3 precisam de **uma ação sua na tela** (abrir o iTerm2 uma vez, fechar o onboarding, e aprovar o prompt "quer controlar o iTerm2" quando o AppleScript rodar). Implicação para a spec: cada host de automação (SwiftBar, o processo do TUI, Terminal) vai precisar da **sua própria** aprovação TCC para controlar o iTerm2 — vale documentar no quickstart (§15.3) como passo de setup do macOS.
+### F1 — criar aba e retornar handle
+Status:   **OK** (3ª rodada, após você aprovar a Automação do macOS)
+Saída:    `create window with default profile` + `id of current session` → `FEB44ED3-53E0-4C15-B81E-CB8AA7DCF694`
+Conclusão: o handle da §9.0 é um **UUID em maiúsculas**, retornado direto na criação. Histórico do caminho até aqui (importa para o quickstart):
+1. iTerm2 não estava instalado (1ª rodada) → instalado via `brew install --cask iterm2` (3.6.11).
+2. `tell application "iTerm2"` **não compila** logo após a instalação (LaunchServices sem o registro) — usar sempre **`tell application id "com.googlecode.iterm2"`**, que é robusto desde o primeiro segundo.
+3. Antes da aprovação de Automação (TCC): `AppleEvent timed out (-1712)` com o diálogo pendente na tela. Não é aprovável por CLI. **Cada host de automação (SwiftBar, processo do TUI, Terminal) precisará da própria aprovação TCC** — documentar como passo de setup no quickstart (§15.3).
+
+### F2 — focar por id
+Status:   **OK**
+Saída:    o script da §9.0 (loop janelas→abas→sessões, `select`+`activate`) retornou `found` e trouxe a janela à frente.
+Conclusão: "abrir ou focar" é viável exatamente como especificado.
+
+### F3 — aba fechada
+Status:   **OK**
+Saída:    após `close t` na aba criada, o mesmo script de busca retornou `missing` — sem erro, sem exceção.
+Conclusão: o caminho `missing` da §9.0 confirma: handle morto é detectável de forma limpa; basta apagar o registro e abrir aba nova.
 
 ---
 
@@ -187,5 +198,5 @@ Conclusão: a heurística da §6.5 **valida** — funciona como detector de "nun
    ```
 
 2. **C2:** decidir quando testar com supervisor parado — precisa de uma janela sem sessões background vivas (local) e/ou da EC2.
-3. **F (macOS):** abrir o iTerm2 uma vez (fechar onboarding) e aprovar o diálogo de Automação quando o AppleScript rodar. iTerm2 3.6.11 já está instalado.
+3. ~~**F (macOS)**~~ — resolvido: Automação aprovada, F1–F3 OK.
 4. **§7.2:** decidir como rotular bloqueio de background sem `waitingFor` (observado: `blocked` + `status: idle`, sem o campo).
