@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> None:
                 from .render.tui import render_view
                 Console().print(render_view(config, view))
             else:
-                from .render.tui import run_tui
+                from .render.tui_app import run_tui
                 run_tui(config)
         return
 

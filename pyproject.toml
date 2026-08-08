@@ -8,6 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
+    "textual>=8.2.8",
 ]
 
 [project.scripts]
@@ -16,6 +17,7 @@ tarmac = "tarmac.cli:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]
@@ -27,3 +29,4 @@ packages = ["tarmac"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
