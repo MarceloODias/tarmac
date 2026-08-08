@@ -33,7 +33,23 @@ from ..derive import (
 )
 from ..strings import tr
 
-SEVERITY_STYLE = {"alarm": "bold red", "warn": "yellow", "info": "cyan", "ok": "green"}
+# badge renders as a full-width status bar; background = severity
+BADGE_STYLE = {
+    "alarm": "bold white on #c01c28",
+    "warn": "bold black on #e5a50a",
+    "info": "bold black on #62a0ea",
+    "ok": "bold black on #57e389",
+}
+SECTION_STYLE = {
+    "for_today": "bold #f8e45c",
+    "needs_you": "bold #ff7b63",
+    "working": "bold #8ff0a4",
+    "scheduled": "bold #99c1f1",
+    "services": "bold #dc8add",
+    "idle": "bold #b0b0b0",
+    "done": "bold #b0b0b0",
+}
+CWD_STYLE = "#8c8c8c"
 
 
 def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
@@ -42,18 +58,22 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
     wide terminals get wide, untruncated names."""
     icon = {"blocked": "⏸", "working": "▶", "idle": "·"}.get(
         row.eff_state, "⏱" if row.overdue or row.due_at else "·")
+    icon_style = {"blocked": "bold #ff7b63", "working": "bold #8ff0a4",
+                  "idle": CWD_STYLE}.get(row.eff_state, "bold #f8e45c")
+    if row.wait_s is not None and row.wait_s >= ESCALATION_ALARM_S:
+        icon_style = "bold #ff5050"
     text = Text()
-    text.append(f"{icon} ")
-    text.append(f"{row.display_name[:name_width]:<{name_width}}")
+    text.append(f"{icon} ", style=icon_style)
+    text.append(f"{row.display_name[:name_width]:<{name_width}}", style="bold white")
     if row.never_named:
-        text.append("✎", style="dim")
+        text.append("✎", style="#f8e45c")
     else:
         text.append(" ")
     if row.pinned:
-        text.append("★", style="yellow")
+        text.append("★", style="#f8e45c")
     else:
         text.append(" ")
-    text.append(f" {row.target_label[:8]:<8}", style="dim")
+    text.append(f" {row.target_label[:8]:<8}", style="bold #62a0ea")
 
     wait = ""
     if row.wait_s is not None:
@@ -62,11 +82,11 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
         wait = f"{prefix}{format_duration(row.wait_s)}{marker}"
     style = ""
     if row.wait_s is not None:
-        style = "green"
+        style = "bold #57e389"
         if row.wait_s >= ESCALATION_ALARM_S:
-            style = "bold red"
+            style = "bold white on #c01c28"
         elif row.wait_s >= ESCALATION_WARN_S:
-            style = "yellow"
+            style = "bold black on #e5a50a"
     text.append(f" {wait:>7}", style=style)
 
     parts = []
@@ -85,9 +105,9 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
     if row.stale:
         parts.append("(stale)")
     if parts:
-        text.append("  " + "  ".join(p for p in parts if p))
+        text.append("  " + "  ".join(p for p in parts if p), style="#deddda")
     if row.cwd:
-        text.append(f"\n    {row.cwd}", style="dim")
+        text.append(f"\n    {row.cwd}", style=CWD_STYLE)
     return text
 
 
@@ -162,7 +182,14 @@ class TarmacApp(App):
     TITLE = "tarmac"
     CSS = """
     #badge { padding: 0 1; height: 1; }
-    #sessions { border: none; height: 1fr; }
+    #sessions { border: none; height: 1fr; padding: 0 1; }
+    #sessions > .option-list--option-highlighted {
+        background: #1c4d8f;
+        text-style: bold;
+    }
+    #sessions:focus > .option-list--option-highlighted {
+        background: #1a5fb4;
+    }
     """
     BINDINGS = [
         Binding("enter", "open", "abrir", priority=False),
@@ -230,7 +257,7 @@ class TarmacApp(App):
             elif tl.state == "error":
                 extra += f"   [red]⚠ {tl.label}[/red]"
         badge_widget.update(
-            f"[{SEVERITY_STYLE.get(severity, '')}]{text}[/]" + extra
+            f"[{BADGE_STYLE.get(severity, '')}]  {text}  [/]" + extra
         )
 
         options: list[Option | None] = []
@@ -239,8 +266,12 @@ class TarmacApp(App):
         def add_section(title_key: str, rows: list[Row]) -> None:
             if not rows:
                 return
-            options.append(Option(Text(tr(locale, title_key), style="bold dim"),
-                                  disabled=True))
+            header = Text()
+            header.append("▍", style=SECTION_STYLE.get(title_key, "bold"))
+            header.append(f"{tr(locale, title_key)} ",
+                          style=SECTION_STYLE.get(title_key, "bold"))
+            header.append("─" * 40, style=CWD_STYLE)
+            options.append(Option(header, disabled=True))
             for row in rows:
                 key = f"{row.target_id}|{row.session_id}"
                 self.rows[key] = row
@@ -253,14 +284,18 @@ class TarmacApp(App):
         add_section("scheduled", view.scheduled)
 
         if view.services:
-            options.append(Option(Text(tr(locale, "services"), style="bold dim"),
-                                  disabled=True))
+            header = Text()
+            header.append("▍", style=SECTION_STYLE["services"])
+            header.append(f"{tr(locale, 'services')} ", style=SECTION_STYLE["services"])
+            header.append("─" * 40, style=CWD_STYLE)
+            options.append(Option(header, disabled=True))
             for s in view.services:
                 line = f"⚙ {s.label}  {s.target_label}  {s.active} {tr(locale, 'active')}"
                 if s.stuck:
                     line += f" · {s.stuck} {tr(locale, 'stuck')} {format_duration(s.stuck_oldest_s)} ⚠"
-                options.append(Option(Text(line, style="yellow" if s.stuck else "dim"),
-                                      disabled=True))
+                options.append(Option(
+                    Text(line, style="bold #f8e45c" if s.stuck else "#deddda"),
+                    disabled=True))
             options.append(None)
 
         add_section("idle", view.other)
