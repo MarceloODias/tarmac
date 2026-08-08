@@ -10,7 +10,7 @@
 | A — ambiente local | **OK** | v2.1.226; schema capturado em `fixtures/agents-local.json`; divergências relevantes no A4 |
 | B — EC2 e SSH | **OK** | `ec2-user@172.16.103.235` via alias `ec2-runner`; mesma versão 2.1.226; coleta não interativa funciona; ControlMaster dá ganho de 3× |
 | C — supervisor | **OK** | **`agents --json` NÃO sobe o supervisor** (testado com daemon parado na EC2) — o poll é seguro; C3/C4 viram N/A |
-| D — agentes de Slack | **N/A** | não existem sessões/diretórios/processos de Slack nesta EC2 hoje; `session_classes` fica como hipótese |
+| D — agentes de Slack | **OK** | gatilho real observado: `kind: interactive` (cwd é o único discriminador), cwd sob `~/ai-agent-skills/**`, sessão some do JSON ao concluir |
 | E — resposta inline | **FALHOU** (resultado útil) | CLI recusa com erro limpo e sugere `attach` ou `--fork-session` |
 | F — iTerm2 | **OK** | F1/F2/F3 confirmados após aprovação de Automação: handle é UUID, "abrir ou focar" viável, aba fechada → `missing` limpo |
 | G — heurística de nomes | **OK** | 3/7 interativas casam o padrão; zero falsos positivos na amostra |
@@ -141,10 +141,25 @@ Conclusão: sem risco via poll, não há o que mitigar por causa do tarmac. O am
 
 ## D. Classes de sessão (agentes de Slack)
 
-### D1–D3
-Status:   **N/A** (nada a observar hoje)
-Saída:    o JSON da EC2 não tem nenhuma sessão com perfil de agente de Slack; não existe diretório `~/slack-agents` (nem `*slack*`) no home do `ec2-user`, e `pgrep` não acha processo relacionado.
-Conclusão: **os agentes de Slack não rodam nesta EC2 (ou não sob este usuário) hoje.** As três perguntas (glob de `match_cwd`, `kind`, volume diário) ficam sem resposta empírica — a config `session_classes` da §3.3 permanece hipótese a validar quando/onde esses agentes existirem. Nada bloqueia o resto da spec: a classe `service` é declarativa e o default (`owned`) cobre o estado atual.
+*(4ª rodada: você disparou uma mensagem real no Slack e eu observei a sessão nascer e morrer no `agents --json` da EC2, com um monitor de 10s.)*
+
+### D1 — `cwd` real
+Status:   **OK**
+Saída:    a sessão do gatilho nasceu com `cwd: /home/ec2-user/ai-agent-skills/ClaudeCode/Monitoring/BackendHealthMonitor`.
+Conclusão: os agentes vivem sob **`~/ai-agent-skills/**`**, não `~/slack-agents/**` como a §3.3 supunha. Glob para o `targets.yaml`:
+`match_cwd: "/home/ec2-user/ai-agent-skills/**"`.
+
+### D2 — `kind`
+Status:   **OK — e derruba uma alternativa**
+Saída:    `kind: "interactive"` (com `pid`), nome default `backendhealthmonitor-51`.
+Conclusão: sessões de Slack são **interactive**, não background — `kind` **não** distingue chatops de sessão minha, então a classificação por `cwd` da §3.3 não é só suficiente: é **necessária**. Dois achados laterais:
+- O nome default veio do basename do cwd **em minúsculas** (`BackendHealthMonitor` → `backendhealthmonitor-51`): a regex do G1/§6.5 precisa comparar com `basename(cwd)` minusculizado (ou casar case-insensitive).
+- A entrada veio **sem `status`** apesar de ter `pid` (capturada segundos após nascer) — mais um campo que o parser não pode exigir (soma-se ao A4).
+
+### D3 — volume e retenção
+Status:   **OK (parcial — 1 gatilho observado)**
+Saída:    1 mensagem no Slack = 1 sessão, que viveu ~2 minutos e então **desapareceu por completo da listagem — inclusive com `--all`**. A listagem voltou à baseline de 4 sessões.
+Conclusão: o `--all` retém só background concluídas; **interactive concluída some sozinha do JSON**. Isso muda a natureza do risco "banco vira log de chat" (§3.3): o JSON se auto-limpa — quem acumula é o **banco do tarmac** (cada sessão efêmera vira uma linha `gone = 1`). A retenção de 24h para `service` continua certa, mas o alvo dela é o SQLite, não a coleta. Volume diário real: ainda sem número (1 gatilho); medir depois de o coletor existir, olhando `first_seen_at` por dia.
 
 ---
 
@@ -219,4 +234,5 @@ Tudo executável foi executado — B, C e F fecharam na 3ª rodada. Restam decis
 3. ~~**F (macOS)**~~ — resolvido: Automação aprovada, F1–F3 OK.
 4. **§7.2:** decidir como rotular bloqueio de background sem `waitingFor` (observado: `blocked` + `status: idle`, sem o campo).
 5. **§3.1 (`targets.yaml`):** usuário real da EC2 é `ec2-user` (não `marcelo`); `claude_bin: /home/ec2-user/.local/bin/claude`.
-6. **§3.3 (D):** agentes de Slack não existem nesta EC2 hoje — decidir se `session_classes` entra na v1 como está (declarativo, inofensivo) ou espera eles existirem.
+6. **§3.3 (D):** atualizar o exemplo de `session_classes` para `match_cwd: "/home/ec2-user/ai-agent-skills/**"` (confirmado com gatilho real; `~/slack-agents/**` não existe). E absorver: chatops é `interactive`, some do JSON ao concluir — a retenção de 24h mira o SQLite.
+7. **§6.5/G1:** a regex de nome default precisa minusculizar o `basename(cwd)` antes de comparar (observado: `BackendHealthMonitor` → `backendhealthmonitor-51`).
