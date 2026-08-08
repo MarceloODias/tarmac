@@ -56,10 +56,11 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
     """One session line. name_width flexes with the terminal: the default
     assumption is a fullscreen window on a dedicated monitor (SPEC §8.0), so
     wide terminals get wide, untruncated names."""
-    icon = {"blocked": "⏸", "working": "▶", "idle": "·"}.get(
+    icon = {"blocked": "⏸", "working": "▶", "idle": "·", "task": "☐"}.get(
         row.eff_state, "⏱" if row.overdue or row.due_at else "·")
     icon_style = {"blocked": "bold #ff7b63", "working": "bold #8ff0a4",
-                  "idle": CWD_STYLE}.get(row.eff_state, "bold #f8e45c")
+                  "idle": CWD_STYLE, "task": "bold #dc8add"}.get(
+        row.eff_state, "bold #f8e45c")
     if row.wait_s is not None and row.wait_s >= ESCALATION_ALARM_S:
         icon_style = "bold #ff5050"
     text = Text()
@@ -178,6 +179,39 @@ class LogView(ModalScreen[None]):
     key_q = key_escape
 
 
+class FolderPick(ModalScreen[tuple[str, str] | None]):
+    """Ask which folder a task should start in, most-used first."""
+
+    CSS = """
+    FolderPick { align: center middle; }
+    #box { width: 90; height: auto; max-height: 80%; border: round $accent; padding: 1 2; }
+    """
+
+    def __init__(self, title: str, candidates: list[tuple[str, str, str]]) -> None:
+        # candidates: (target_id, target_label, cwd)
+        super().__init__()
+        self._title = title
+        self._candidates = candidates
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Label(self._title)
+            ol = OptionList()
+            for target_id, target_label, cwd in self._candidates:
+                ol.add_option(Option(
+                    Text.assemble((f"{target_label:<8}", "bold #62a0ea"), f" {cwd}"),
+                    id=f"{target_id}|{cwd}",
+                ))
+            yield ol
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        target_id, cwd = event.option.id.split("|", 1)
+        self.dismiss((target_id, cwd))
+
+    def key_escape(self) -> None:
+        self.dismiss(None)
+
+
 class TarmacApp(App):
     TITLE = "tarmac"
     CSS = """
@@ -193,6 +227,7 @@ class TarmacApp(App):
     """
     BINDINGS = [
         Binding("enter", "open", "abrir", priority=False),
+        Binding("t", "new_task", "tarefa"),
         Binding("c", "copy_resume", "resume"),
         Binding("p", "pin", "fixar"),
         Binding("m", "remember", "lembrar"),
@@ -325,6 +360,9 @@ class TarmacApp(App):
             return None
         target = self.config.target(row.target_id)
         if target is None:
+            if row.kind == "task":
+                # unresolved task: folder (and target) get picked on open
+                return Target(id="", transport="local"), row
             return None
         return target, row
 
@@ -350,7 +388,69 @@ class TarmacApp(App):
         if cur is None:
             return
         target, row = cur
+        if row.kind == "task":
+            self._open_task(row)
+            return
         self._run_bg(lambda: actions.open_or_focus(self.conn, target, row))
+
+    # ---------- standalone tasks ----------
+
+    def action_new_task(self) -> None:
+        def handle(value: str | None) -> None:
+            if not value:
+                return
+            from ..tasks import add_task, cwd_candidates, infer_folder
+            task_id = add_task(self.conn, value)
+            guess = infer_folder(value, cwd_candidates(self.conn))
+            if guess:
+                from ..tasks import set_task_folder
+                set_task_folder(self.conn, task_id, guess.target_id, guess.cwd)
+                self.notify(f"tarefa criada → {guess.cwd}")
+            else:
+                self.notify("tarefa criada (pasta será perguntada ao abrir)")
+            self.refresh_data()
+
+        self.push_screen(
+            TextPrompt("Nova tarefa",
+                       "no benji-dp, preciso dividir os rampids em ssps…"),
+            handle,
+        )
+
+    def _open_task(self, row: Row) -> None:
+        from ..tasks import cwd_candidates, infer_folder, mark_opened, set_task_folder
+        task_id = int(row.session_id.split(":", 1)[1])
+        text = row.display_name
+
+        def launch(target_id: str, cwd: str) -> None:
+            target = self.config.target(target_id)
+            if target is None:
+                self.notify(f"target desconhecido: {target_id}", severity="error")
+                return
+            set_task_folder(self.conn, task_id, target_id, cwd)
+            mark_opened(self.conn, task_id)
+            self._run_bg(lambda: actions.open_task(self.conn, target, task_id, cwd, text))
+
+        if row.target_id and row.cwd:
+            launch(row.target_id, row.cwd)
+            return
+        guess = infer_folder(text, cwd_candidates(self.conn))
+        if guess:
+            launch(guess.target_id, guess.cwd)
+            return
+        labels = {t.id: t.label for t in self.config.enabled_targets()}
+        candidates = [(c.target_id, labels.get(c.target_id, c.target_id), c.cwd)
+                      for c in cwd_candidates(self.conn)]
+        if not candidates:
+            self.notify("sem histórico de pastas ainda — rode sessões primeiro",
+                        severity="warning")
+            return
+
+        def picked(choice: tuple[str, str] | None) -> None:
+            if choice:
+                launch(*choice)
+
+        self.push_screen(
+            FolderPick("Em qual pasta esta tarefa começa?", candidates), picked)
 
     def action_copy_resume(self) -> None:
         cur = self._current()
@@ -398,11 +498,17 @@ class TarmacApp(App):
                 self.notify(str(e), severity="error")  # keep field open? re-prompt
                 self._prompt_due(title, hide)
                 return
-            dbm.upsert_meta(
-                self.conn, row.target_id, row.session_id,
-                due_at=int(due.timestamp() * 1000), due_label=value,
-                hide_until_due=hide, resolved_at=None,
-            )
+            if row.kind == "task":
+                task_id = int(row.session_id.split(":", 1)[1])
+                self.conn.execute(
+                    "UPDATE tasks SET due_at = ?, due_label = ? WHERE id = ?",
+                    (int(due.timestamp() * 1000), value, task_id))
+            else:
+                dbm.upsert_meta(
+                    self.conn, row.target_id, row.session_id,
+                    due_at=int(due.timestamp() * 1000), due_label=value,
+                    hide_until_due=hide, resolved_at=None,
+                )
             self.conn.commit()
             self.notify(human_confirmation(due, locale=self.config.settings.locale))
             self.refresh_data()
@@ -457,10 +563,14 @@ class TarmacApp(App):
         if cur is None:
             return
         _, row = cur
-        from .. import db as dbm
-        dbm.upsert_meta(self.conn, row.target_id, row.session_id,
-                        resolved_at=dbm.now_ms())
-        self.conn.commit()
+        if row.kind == "task":
+            from ..tasks import resolve_task
+            resolve_task(self.conn, int(row.session_id.split(":", 1)[1]))
+        else:
+            from .. import db as dbm
+            dbm.upsert_meta(self.conn, row.target_id, row.session_id,
+                            resolved_at=dbm.now_ms())
+            self.conn.commit()
         self.refresh_data()
 
     def action_stop(self) -> None:

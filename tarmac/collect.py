@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sqlite3
 import subprocess
@@ -17,8 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from . import db as dbm
-from .config import Config, Target
+from .config import Config, Target, tarmac_home
 from .model import Session, parse_agents_json
+
+NEXT_STEPS_REMOTE = "~/.tarmac/next-steps.jsonl"
 
 TARGET_TIMEOUT_S = 15
 BACKOFF_MS = [60_000, 120_000, 300_000]  # SPEC §4.4
@@ -240,6 +243,65 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         )
 
 
+def fetch_next_steps(target: Target) -> list[dict]:
+    """Drain the machine-local queue written by the SessionEnd hook (SPEC §10).
+
+    Read-then-truncate; on any failure returns [] and leaves the file alone
+    (the next cycle retries). Lines are JSON: {session_id, next_step, at}.
+    """
+    try:
+        if target.transport == "local":
+            path = tarmac_home() / "next-steps.jsonl"
+            if not path.exists():
+                return []
+            text = path.read_text()
+            path.write_text("")
+        else:
+            host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
+            proc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
+                 f"cat {NEXT_STEPS_REMOTE} 2>/dev/null && : > {NEXT_STEPS_REMOTE}"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode != 0:
+                return []
+            text = proc.stdout
+    except Exception:
+        return []
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("session_id") and entry.get("next_step"):
+            out.append(entry)
+    return out
+
+
+def apply_next_steps(conn: sqlite3.Connection, target: Target, entries: list[dict]) -> None:
+    for entry in entries:
+        uuid = str(entry["session_id"])
+        row = conn.execute(
+            "SELECT session_id FROM sessions WHERE target_id = ? "
+            "AND (uuid = ? OR session_id = ?)",
+            (target.id, uuid, uuid),
+        ).fetchone()
+        session_id = row["session_id"] if row else uuid
+        meta = dbm.get_meta(conn, target.id, session_id)
+        # auto never overwrites what I typed by hand (SPEC §10)
+        if meta and meta["next_step"] and meta["next_step_origin"] == "manual":
+            continue
+        dbm.upsert_meta(
+            conn, target.id, session_id,
+            next_step=str(entry["next_step"]).strip()[:200],
+            next_step_origin="auto",
+        )
+
+
 def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> list[TargetResult]:
     """Collect every enabled target in parallel and mirror into the DB."""
     now = dbm.now_ms()
@@ -260,6 +322,8 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     with conn:
         for r in results:
             apply_result(conn, r)
+            if r.sessions is not None:  # only drain machines we can reach
+                apply_next_steps(conn, r.target, fetch_next_steps(r.target))
         dbm.prune_service_sessions(conn)
         dbm.kv_set(conn, "last_collect_at", str(now))
     return results

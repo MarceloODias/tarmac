@@ -95,6 +95,11 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("gc-tabs", help="fecha abas resolvidas (SPEC §9.0.1)")
     p.add_argument("--idle-min", type=int, default=None)
 
+    p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
+    p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
+    p.add_argument("--due", help="prazo em linguagem natural (amanhã, segunda…)")
+    p.add_argument("--done", type=int, metavar="ID", help="resolve a tarefa")
+
     args = parser.parse_args(argv)
     config = load_config()
     conn = dbm.connect()
@@ -140,6 +145,40 @@ def main(argv: list[str] | None = None) -> None:
         idle = args.idle_min or config.settings.idle_tab_min
         closed = actions.close_resolved_tabs(conn, idle)
         print(f"{len(closed)} aba(s) fechada(s)")
+        return
+
+    if args.cmd == "task":
+        from .tasks import add_task, cwd_candidates, infer_folder, open_tasks, resolve_task, set_task_folder
+        if args.done is not None:
+            resolve_task(conn, args.done)
+            print(f"tarefa {args.done} resolvida")
+            return
+        if not args.text:
+            for tk in open_tasks(conn):
+                due = f"  ⏱ {tk['due_label']}" if tk["due_label"] else ""
+                folder = f"  → {tk['cwd']}" if tk["cwd"] else ""
+                print(f"[{tk['id']}] {tk['text']}{due}{folder}")
+            return
+        text = " ".join(args.text)
+        due_at = due_label = None
+        if args.due:
+            try:
+                due = parse_with_fallback(
+                    args.due,
+                    default_hour=config.settings.default_hour,
+                    end_of_day_hour=config.settings.end_of_day_hour,
+                )
+            except DateParseError as e:
+                sys.exit(str(e))
+            due_at, due_label = int(due.timestamp() * 1000), args.due
+            print(human_confirmation(due, locale=config.settings.locale))
+        task_id = add_task(conn, text, due_at, due_label)
+        guess = infer_folder(text, cwd_candidates(conn))
+        if guess:
+            set_task_folder(conn, task_id, guess.target_id, guess.cwd)
+            print(f"tarefa {task_id} criada → {guess.cwd} ({guess.target_id})")
+        else:
+            print(f"tarefa {task_id} criada (pasta será perguntada ao abrir)")
         return
 
     target = _require_target(config, args.target_id)

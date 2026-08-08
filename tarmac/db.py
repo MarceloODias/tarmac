@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS target_status (
   claude_version TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY,
+  text        TEXT NOT NULL,
+  target_id   TEXT,           -- resolved on first open
+  cwd         TEXT,           -- resolved folder to start Claude Code in
+  due_at      INTEGER,
+  due_label   TEXT,
+  created_at  INTEGER,
+  opened_at   INTEGER,
+  resolved_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY,
   value TEXT

@@ -79,7 +79,37 @@
     instalação está no README (um symlink que chama `tarmac render --format
     swiftbar`).
 
-## Fora do escopo desta entrega (deliberado)
+## Confirmadas pelo Marcelo (2026-08-08, rodada de perguntas no painel)
+
+20. **Rótulo de bloqueio sem `waitingFor` = "blocked" genérico** (§7.2) — confirmado.
+21. **Seção OCIOSO visível no fim do TUI** — confirmado.
+22. **Lembrete não tira bloqueada de PRECISA DE VOCÊ; `≥` literal; TUI
+    interativo; fullscreen como caso padrão** — confirmados nas rodadas
+    anteriores.
+23. **Hook de `next_step` instalado no Mac e na EC2** (user-level
+    `~/.claude/settings.json`, backup da EC2 em `settings.json.bak-tarmac`).
+    Redesenhado sem dependência do tarmac na EC2: o hook grava
+    `~/.tarmac/next-steps.jsonl` na máquina local e o coletor drena a fila a
+    cada ciclo (local ou por ssh). Exclusão de chatops por env
+    `TARMAC_NEXTSTEP_EXCLUDE=/home/ec2-user/ai-agent-skills` (o hook sai antes
+    do `claude -p` nesses cwds — instalar user-level não fura a regra da §10).
+24. **Instalação durável**: binário via `uv tool install` →
+    `~/.local/bin/tarmac` (o worktree pode sumir; a instalação não). Profile
+    dinâmico do iTerm2 "tarmac" (Menlo 16pt, roda o painel ao abrir) e
+    LaunchAgent `com.diastech.tarmac` abre a janela no login.
+
+## Feature nova pedida pelo Marcelo (fora da spec original)
+
+25. **Tarefas avulsas** (`tarmac task "…"` / tecla `t` no painel): intenção
+    sem sessão. Vivem em AGENDADO (☐), sobem para PRA HOJE quando vencem,
+    `x` resolve, `m`/`a` dão prazo. Ao abrir (`Enter`): a pasta é inferida do
+    texto contra o histórico de cwds das sessões `owned` (worktrees dobrados
+    na raiz do repo; basename como palavra no texto, ex. "no benji-dp…" →
+    `~/projects/inpowered/benji-dp`); empate só resolve sozinho com dominância
+    3:1 de uso, senão um modal pergunta com as pastas mais usadas. A abertura
+    roda `cd <pasta> && claude "<texto da tarefa>"` numa aba do iTerm
+    (abrir-ou-focar, como sessões). Sem varredura de filesystem: o histórico
+    do espelho é a única fonte de candidatos, coerente com a §2.
 
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.
 - `Fechar abas resolvidas` existe como `tarmac gc-tabs` (nunca automático).

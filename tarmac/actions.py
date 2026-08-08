@@ -184,6 +184,55 @@ def open_or_focus(
     )
 
 
+def task_command(target: Target, cwd: str, text: str) -> str:
+    """Start a fresh Claude Code in the task's folder, with the task text as
+    the opening prompt."""
+    inner = f"cd {shlex.quote(cwd)} && {target.claude_bin} {shlex.quote(text)}"
+    if target.needs_config_dir_export:
+        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    if target.transport == "ssh":
+        host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
+        return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"
+    return inner
+
+
+def open_task(
+    conn: sqlite3.Connection, target: Target, task_id: int, cwd: str, text: str,
+) -> str:
+    """Open-or-focus a terminal tab running Claude Code for a standalone task."""
+    key = f"task:{task_id}"
+    command = task_command(target, cwd, text)
+    handle_row = conn.execute(
+        "SELECT handle FROM terminal_handles WHERE target_id = ? AND session_id = ?",
+        (target.id, key),
+    ).fetchone()
+    if handle_row and handle_row["handle"]:
+        if focus_tab(handle_row["handle"]) == "found":
+            return "focado"
+        conn.execute(
+            "DELETE FROM terminal_handles WHERE target_id = ? AND session_id = ?",
+            (target.id, key),
+        )
+        conn.commit()
+    handle, msg = create_tab(command)
+    if handle:
+        conn.execute(
+            "INSERT INTO terminal_handles (target_id, session_id, handle, opened_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(target_id, session_id) DO UPDATE SET "
+            "handle = excluded.handle, opened_at = excluded.opened_at",
+            (target.id, key, handle, dbm.now_ms()),
+        )
+        conn.commit()
+        return "aberto"
+    copied = copy_to_clipboard(command)
+    return (
+        f"iTerm2 indisponível ({msg}). Comando "
+        + ("copiado para o clipboard: " if copied else "para colar manualmente: ")
+        + command
+    )
+
+
 def close_resolved_tabs(
     conn: sqlite3.Connection, idle_min: int = 30,
 ) -> list[str]:

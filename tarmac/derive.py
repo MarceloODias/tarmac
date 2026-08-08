@@ -223,10 +223,37 @@ def build_view(
             view.other.append(row)
         # gone sessions without due/pin simply don't render (meta survives in DB)
 
+    # standalone tasks (intent without a session): live in AGENDADO, rise to
+    # PRA HOJE when overdue, open by starting Claude Code in their folder
+    from .tasks import open_tasks
+    labels = {t.id: t.label for t in config.enabled_targets()}
+    for tk in open_tasks(conn):
+        row = Row(
+            target_id=tk["target_id"] or "",
+            target_label=labels.get(tk["target_id"], "?") if tk["target_id"] else "?",
+            session_id=f"task:{tk['id']}",
+            display_name=tk["text"],
+            eff_state="task",
+            kind="task",
+            cwd=tk["cwd"],
+            short_id=None,
+            uuid=None,
+            waiting_for=None,
+            gone=False,
+            stale=False,
+            due_at=tk["due_at"],
+            due_label=tk["due_label"],
+        )
+        if row.due_at and row.due_at <= now:
+            row.overdue = True
+            view.overdue.append(row)
+        else:
+            view.scheduled.append(row)
+
     view.overdue.sort(key=lambda r: r.due_at or 0)                    # oldest first
     view.blocked.sort(key=lambda r: -(r.wait_s or 0))                 # longest wait first
     view.working.sort(key=lambda r: (not r.pinned, r.display_name))
-    view.scheduled.sort(key=lambda r: r.due_at or 0)
+    view.scheduled.sort(key=lambda r: (r.due_at is None, r.due_at or 0))
     view.services = sorted(service_agg.values(), key=lambda s: (s.target_label, s.label))
     return view
 
