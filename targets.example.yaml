@@ -1,0 +1,58 @@
+# tarmac targets — copy to ~/.tarmac/targets.yaml and edit.
+# The real file is gitignored: it carries hostnames, users and internal paths.
+#
+# A target is identity + machine + config dir (SPEC §3): the same machine with
+# two CLAUDE_CONFIG_DIRs is two independent session universes.
+
+settings:
+  locale: pt              # 'pt' | 'en' — UI language and date-input language
+  default_hour: 9         # 'na segunda' -> monday 09:00
+  end_of_day_hour: 18     # 'fim do dia' -> 18:00
+  service_stuck_min: 30   # service session blocked longer than this raises ⚠
+  stale_after_s: 60       # collect_if_stale window
+  idle_tab_min: 30        # 'close resolved tabs' threshold
+
+targets:
+  - id: mac-local
+    label: "Mac"
+    owner: me
+    mine: true
+    transport: local
+    config_dir: ~/.claude
+
+  # Same machine, alternate account = separate target:
+  # - id: mac-local-alt
+  #   label: "Mac (alt)"
+  #   owner: me
+  #   mine: true
+  #   transport: local
+  #   config_dir: ~/.claude-alt
+
+  - id: ec2
+    label: "EC2"
+    owner: me
+    mine: true
+    transport: ssh
+    ssh_host: ec2-runner          # alias in ~/.ssh/config (user may be baked in)
+    # ssh_user: ec2-user          # set if not in the ssh alias
+    claude_bin: /home/ec2-user/.local/bin/claude   # absolute path, mandatory
+    config_dir: ~/.claude
+    expect_intermittent: true     # behind a VPN: offline is routine, not ⚠
+    offline_after: 3              # failed cycles before marking offline
+    session_classes:
+      # sessions driven by automation (chatops, CI, cron) that you never
+      # conduct: counted, never listed (SPEC §3.3)
+      - class: service
+        label: "slack-agents"
+        match_cwd: "/home/ec2-user/ai-agent-skills/**"
+
+  # Someone else's sessions on a shared box (collected as THAT user, via their
+  # ssh alias/key — never sudo):
+  # - id: ec2-frank
+  #   label: "EC2 (frank)"
+  #   owner: frank
+  #   mine: false
+  #   enabled: false
+  #   transport: ssh
+  #   ssh_host: ec2-frank
+  #   claude_bin: /home/frank/.local/bin/claude

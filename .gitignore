@@ -1,3 +1,10 @@
 # SPEC §15.4 — nunca versionar config real de targets nem capturas não sanitizadas
 targets.yaml
 fixtures/raw-*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
