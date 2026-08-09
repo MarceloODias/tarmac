@@ -63,6 +63,23 @@ async def test_pin_action_persists(app_env):
         assert meta is not None and meta["pinned"] == 1
 
 
+async def test_open_action_from_worker_thread(app_env, monkeypatch, tmp_path):
+    # regression: sqlite connections are thread-bound; the open action runs in
+    # a worker thread and must NOT reuse the app's main-thread connection
+    import tarmac.actions as actions_mod
+    monkeypatch.setattr(actions_mod, "create_tab", lambda cmd: ("HANDLE-1", "ok"))
+    monkeypatch.setattr(actions_mod, "focus_tab", lambda h: "missing")
+    app = TarmacApp(app_env)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app._current() is not None
+        app.action_open()
+        await app.workers.wait_for_complete()
+        conn = dbm.connect(tmp_path / "tarmac.db")
+        row = conn.execute("SELECT handle FROM terminal_handles").fetchone()
+        assert row is not None and row["handle"] == "HANDLE-1"
+
+
 async def test_wide_terminal_gets_wide_names(app_env):
     app = TarmacApp(app_env)
     async with app.run_test(size=(200, 50)) as pilot:

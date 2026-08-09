@@ -392,7 +392,8 @@ class TarmacApp(App):
         if row.kind == "task":
             self._open_task(row)
             return
-        self._run_bg(lambda: actions.open_or_focus(self.conn, target, row))
+        # sqlite connections are thread-bound: each worker opens its own
+        self._run_bg(lambda: actions.open_or_focus(connect(), target, row))
 
     # ---------- standalone tasks ----------
 
@@ -429,7 +430,7 @@ class TarmacApp(App):
                 return
             set_task_folder(self.conn, task_id, target_id, cwd)
             mark_opened(self.conn, task_id)
-            self._run_bg(lambda: actions.open_task(self.conn, target, task_id, cwd, text))
+            self._run_bg(lambda: actions.open_task(connect(), target, task_id, cwd, text))
 
         if row.target_id and row.cwd:
             launch(row.target_id, row.cwd)
@@ -472,7 +473,7 @@ class TarmacApp(App):
         except ValueError as e:
             self.notify(str(e), severity="error")
             return
-        self._run_bg(lambda: actions.open_or_focus(self.conn, target, row, command=cmd))
+        self._run_bg(lambda: actions.open_or_focus(connect(), target, row, command=cmd))
 
     def action_copy_resume(self) -> None:
         cur = self._current()
