@@ -171,7 +171,9 @@ class LogView(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
             yield Label(self._title)
-            yield Static(self._body, id="logs")
+            # Text.from_ansi: log output is full of ANSI codes and literal
+            # [brackets] — never let it near the markup parser (it crashes)
+            yield Static(Text.from_ansi(self._body), id="logs")
 
     def key_escape(self) -> None:
         self.dismiss(None)
@@ -455,18 +457,21 @@ class TarmacApp(App):
             FolderPick("Em qual pasta esta tarefa começa?", candidates), picked)
 
     def action_resume_tab(self) -> None:
-        """`c`: open a tab already running claude --resume for this session.
+        """`c`: open a tab already inside this session's conversation.
 
-        Works for gone/done sessions (resume outlives the agent view); for a
-        session still RUNNING as a bg agent the CLI itself refuses the resume
-        (FINDINGS E) — the error lands in the opened tab, and Enter/attach is
-        the right verb for those anyway."""
+        Finished/vanished sessions get `claude --resume`; live ones are
+        ATTACHED instead — the CLI refuses --resume while the session runs as
+        a bg agent (FINDINGS E), so attach is the only verb that works there."""
         cur = self._current()
         if cur is None:
             return
         target, row = cur
         if row.kind == "task":
             self._open_task(row)
+            return
+        if actions.session_is_live(row):
+            self.notify("sessão viva — anexando (o CLI recusa resume em sessão ativa)")
+            self._run_bg(lambda: actions.open_or_focus(connect(), target, row))
             return
         try:
             cmd = actions.resume_command(target, row)
@@ -575,8 +580,15 @@ class TarmacApp(App):
             return
 
         def work():
-            proc = actions.remote_claude(target, "logs", row.short_id)
-            body = proc.stdout or proc.stderr or "(vazio)"
+            # any exception in a textual worker crashes the app — never let one out
+            try:
+                proc = actions.remote_claude(target, "logs", row.short_id)
+                body = proc.stdout or proc.stderr or "(vazio)"
+            except Exception as e:
+                self.call_from_thread(self.notify, f"logs falharam: {e}",
+                                      severity="error")
+                return
+            body = body[-20_000:]  # last chunk is what matters
             self.call_from_thread(
                 self.push_screen, LogView(f"logs · {row.display_name}", body))
         self.run_worker(work, thread=True)

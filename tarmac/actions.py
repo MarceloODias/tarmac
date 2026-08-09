@@ -42,13 +42,30 @@ def attach_command(target: Target, row: Row) -> str:
 def resume_command(target: Target, row: Row) -> str:
     if not row.uuid:
         raise ValueError("sessão sem uuid — não há comando de resume")
-    inner = f"claude --resume {row.uuid}"
+    bin_ = target.claude_bin if target.transport == "ssh" else "claude"
+    inner = f"{bin_} --resume {row.uuid}"
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"
     return inner
+
+
+def session_is_live(row: Row) -> bool:
+    """Live sessions must be ATTACHED; the CLI refuses --resume on them
+    (FINDINGS E: 'currently running as a background agent')."""
+    from .model import TERMINAL_STATES
+    return not row.gone and row.eff_state not in TERMINAL_STATES
+
+
+def best_open_command(target: Target, row: Row) -> str:
+    """attach for live sessions, resume for finished/vanished ones."""
+    if session_is_live(row) and row.short_id:
+        return attach_command(target, row)
+    if row.uuid:
+        return resume_command(target, row)
+    return attach_command(target, row)
 
 
 def remote_claude(target: Target, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -119,26 +136,46 @@ def focus_tab(handle: str) -> str:
     return out if ok else f"error: {out}"
 
 
-def create_tab(command: str) -> tuple[str | None, str]:
-    """Create a window running `command`; return (handle, message)."""
+def create_tab(command: str, window_id: str | None = None) -> tuple[str | None, str | None, str]:
+    """Run `command` in a NEW TAB of the sessions window (creating that window
+    when it doesn't exist yet). Returns (session_handle, window_id, message).
+
+    One dedicated window collects every session tab — the panel window stays
+    untouched and the desktop doesn't fill up with loose windows."""
     escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+    win_clause = f'''
+      set targetWindow to missing value
+      repeat with w in windows
+        if (id of w as text) is "{window_id or ''}" then
+          set targetWindow to w
+        end if
+      end repeat
+      if targetWindow is missing value then
+        create window with default profile
+        set targetWindow to current window
+      else
+        tell targetWindow to create tab with default profile
+      end if
+    '''
     script = f'''
     with timeout of 20 seconds
     tell application id "{ITERM_ID}"
-      create window with default profile
-      tell current session of current window
+      {win_clause}
+      tell current session of targetWindow
         write text "{escaped}"
         set h to id
       end tell
+      select targetWindow
       activate
-      return h
+      return (id of targetWindow as text) & "|" & h
     end tell
     end timeout
     '''
     ok, out = _osascript(script)
-    if ok and out:
-        return out, "ok"
-    return None, out
+    if ok and "|" in out:
+        win, handle = out.split("|", 1)
+        return handle, win, "ok"
+    return None, None, out
 
 
 def open_or_focus(
@@ -150,7 +187,7 @@ def open_or_focus(
 
     `command` overrides what runs in a fresh tab (e.g. a resume instead of an
     attach); the handle key is the same either way — one tab per session."""
-    command = command or attach_command(target, row)
+    command = command or best_open_command(target, row)
 
     handle_row = conn.execute(
         "SELECT handle FROM terminal_handles WHERE target_id = ? AND session_id = ?",
@@ -167,8 +204,9 @@ def open_or_focus(
         )
         conn.commit()
 
-    handle, msg = create_tab(command)
+    handle, win, msg = create_tab(command, dbm.kv_get(conn, "sessions_window_id"))
     if handle:
+        dbm.kv_set(conn, "sessions_window_id", win or "")
         conn.execute(
             "INSERT INTO terminal_handles (target_id, session_id, handle, opened_at) "
             "VALUES (?, ?, ?, ?) "
@@ -218,8 +256,9 @@ def open_task(
             (target.id, key),
         )
         conn.commit()
-    handle, msg = create_tab(command)
+    handle, win, msg = create_tab(command, dbm.kv_get(conn, "sessions_window_id"))
     if handle:
+        dbm.kv_set(conn, "sessions_window_id", win or "")
         conn.execute(
             "INSERT INTO terminal_handles (target_id, session_id, handle, opened_at) "
             "VALUES (?, ?, ?, ?) "

@@ -65,6 +65,31 @@ def test_resume_command_uses_uuid():
         "claude --resume abc12345-1111-2222-3333-444455556666"
 
 
+def test_resume_command_uses_claude_bin_over_ssh():
+    t = Target(id="ec2", transport="ssh", ssh_host="h",
+               claude_bin="/home/u/.local/bin/claude")
+    assert "/home/u/.local/bin/claude --resume" in resume_command(t, make_row())
+
+
+def test_best_open_command_attach_live_resume_finished():
+    # FINDINGS E: the CLI refuses --resume on a running bg session — live
+    # sessions must attach; finished/vanished ones resume.
+    from tarmac.actions import best_open_command, session_is_live
+    t = Target(id="mac", transport="local")
+
+    live = make_row(eff_state="blocked")
+    assert session_is_live(live)
+    assert "attach" in best_open_command(t, live)
+
+    done = make_row(eff_state="done")
+    assert not session_is_live(done)
+    assert "--resume" in best_open_command(t, done)
+
+    gone = make_row(eff_state="blocked", gone=True)
+    assert not session_is_live(gone)
+    assert "--resume" in best_open_command(t, gone)
+
+
 def test_config_validation(tmp_path):
     bad = tmp_path / "targets.yaml"
     bad.write_text("targets:\n  - id: x\n    transport: ssh\n    ssh_host: h\n")
