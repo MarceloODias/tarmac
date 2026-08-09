@@ -143,10 +143,14 @@ def create_tab(command: str) -> tuple[str | None, str]:
 
 def open_or_focus(
     conn: sqlite3.Connection, target: Target, row: Row,
+    command: str | None = None,
 ) -> str:
     """Click action: focus the registered tab if it still exists, else create
-    one and register the handle (SPEC §9.0). Returns a human message."""
-    command = attach_command(target, row)
+    one and register the handle (SPEC §9.0). Returns a human message.
+
+    `command` overrides what runs in a fresh tab (e.g. a resume instead of an
+    attach); the handle key is the same either way — one tab per session."""
+    command = command or attach_command(target, row)
 
     handle_row = conn.execute(
         "SELECT handle FROM terminal_handles WHERE target_id = ? AND session_id = ?",

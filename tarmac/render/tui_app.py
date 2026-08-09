@@ -228,7 +228,8 @@ class TarmacApp(App):
     BINDINGS = [
         Binding("enter", "open", "abrir", priority=False),
         Binding("t", "new_task", "tarefa"),
-        Binding("c", "copy_resume", "resume"),
+        Binding("c", "resume_tab", "resume em aba"),
+        Binding("C", "copy_resume", "copiar resume"),
         Binding("p", "pin", "fixar"),
         Binding("m", "remember", "lembrar"),
         Binding("a", "defer", "adiar"),
@@ -451,6 +452,27 @@ class TarmacApp(App):
 
         self.push_screen(
             FolderPick("Em qual pasta esta tarefa começa?", candidates), picked)
+
+    def action_resume_tab(self) -> None:
+        """`c`: open a tab already running claude --resume for this session.
+
+        Works for gone/done sessions (resume outlives the agent view); for a
+        session still RUNNING as a bg agent the CLI itself refuses the resume
+        (FINDINGS E) — the error lands in the opened tab, and Enter/attach is
+        the right verb for those anyway."""
+        cur = self._current()
+        if cur is None:
+            return
+        target, row = cur
+        if row.kind == "task":
+            self._open_task(row)
+            return
+        try:
+            cmd = actions.resume_command(target, row)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+        self._run_bg(lambda: actions.open_or_focus(self.conn, target, row, command=cmd))
 
     def action_copy_resume(self) -> None:
         cur = self._current()
