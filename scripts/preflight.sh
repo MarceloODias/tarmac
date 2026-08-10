@@ -46,6 +46,22 @@ else
   printf '  ✓ hook off\n'
 fi
 
+step "abertura do painel não depende de shell interativo"
+PROFILE="$HOME/Library/Application Support/iTerm2/DynamicProfiles/tarmac.json"
+if [ -f "$PROFILE" ]; then
+  if grep -q '"Initial Text"' "$PROFILE"; then
+    printf '  ✗ profile usa Initial Text (digita no shell: corrida e funções do zsh)\n'; fail=1
+  elif grep -q '"Custom Command": "Yes"' "$PROFILE"; then
+    launcher=$(python3 -c "import json,os;print(os.path.expandvars(json.load(open('$PROFILE'))['Profiles'][0].get('Command','')))" 2>/dev/null)
+    if [ -x "$launcher" ]; then printf '  ✓ Custom Command → %s\n' "$launcher"
+    else printf '  ✗ Command não executável: %s\n' "$launcher"; fail=1; fi
+  else
+    printf '  ✗ profile sem Custom Command\n'; fail=1
+  fi
+else
+  printf '  · profile do iTerm não instalado (ok fora do Mac do Marcelo)\n'
+fi
+
 step "regra de ouro (§2): nada lê os arquivos internos do CLI"
 if grep -rn --include='*.py' -e '\.claude/projects' -e 'state\.json' tarmac/ >/dev/null 2>&1; then
   printf '  ✗ código lendo fonte proibida\n'; fail=1
