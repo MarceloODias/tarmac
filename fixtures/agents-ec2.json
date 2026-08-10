@@ -1,0 +1,38 @@
+[
+  {
+    "id": "1a2b3c4d",
+    "cwd": "/home/user/services/service-x/runtime-container",
+    "kind": "background",
+    "startedAt": 1783483270211,
+    "sessionId": "1a2b3c4d-0000-4111-8222-333344445555",
+    "name": "Esclarecer cálculo de métrica no ambiente de produção",
+    "state": "done"
+  },
+  {
+    "id": "2b3c4d5e",
+    "cwd": "/home/user/services/service-x/runtime-container",
+    "kind": "background",
+    "startedAt": 1783692934151,
+    "sessionId": "2b3c4d5e-1111-4222-8333-444455556666",
+    "name": "resume-background-agent",
+    "state": "failed"
+  },
+  {
+    "id": "3c4d5e6f",
+    "cwd": "/opt",
+    "kind": "background",
+    "startedAt": 1785255773704,
+    "sessionId": "3c4d5e6f-2222-4333-8444-555566667777",
+    "name": "Understand agent structure and functionality",
+    "state": "blocked"
+  },
+  {
+    "pid": 730796,
+    "cwd": "/home/user/services/service-x",
+    "kind": "interactive",
+    "startedAt": 1786192792897,
+    "sessionId": "4d5e6f70-3333-4444-8555-666677778888",
+    "name": "fix-service-wsi",
+    "status": "idle"
+  }
+]

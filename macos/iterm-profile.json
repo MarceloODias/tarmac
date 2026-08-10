@@ -1,0 +1,19 @@
+{
+  "Profiles": [
+    {
+      "Name": "tarmac",
+      "Guid": "tarmac-panel-profile",
+      "Normal Font": "Menlo-Regular 16",
+      "Non Ascii Font": "Menlo-Regular 16",
+      "Use Non-ASCII Font": false,
+      "Custom Window Title": "tarmac",
+      "Allow Title Setting": false,
+      "Custom Command": "Yes",
+      "Command": "$HOME/.tarmac/panel.sh",
+      "Close Sessions On End": true,
+      "Silence Bell": true,
+      "Unlimited Scrollback": false,
+      "Scrollback Lines": 1000
+    }
+  ]
+}

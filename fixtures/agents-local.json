@@ -1,0 +1,88 @@
+[
+  {
+    "id": "07f6e5d4",
+    "cwd": "/home/user/projects/data-pipeline",
+    "kind": "background",
+    "startedAt": 1782487478218,
+    "sessionId": "07f6e5d4-c3b2-a189-07f6-e5d4c3b2a189",
+    "name": "Fix data path and date format migration script",
+    "state": "blocked"
+  },
+  {
+    "pid": 64584,
+    "cwd": "/home/user",
+    "kind": "interactive",
+    "startedAt": 1785532754997,
+    "sessionId": "091a2b3c-4d5e-6f78-091a-2b3c4d5e6f78",
+    "name": "user-e9",
+    "status": "idle"
+  },
+  {
+    "pid": 75094,
+    "cwd": "/home/user/projects/project-a",
+    "kind": "interactive",
+    "startedAt": 1785539192944,
+    "sessionId": "0a3d70a3-d70a-3d67-0a3d-70a3d70a3d67",
+    "name": "project-a-report",
+    "status": "idle"
+  },
+  {
+    "pid": 6330,
+    "cwd": "/home/user/projects/project-b",
+    "kind": "interactive",
+    "startedAt": 1785691544058,
+    "sessionId": "0b60b60b-60b6-0b56-0b60-b60b60b60b56",
+    "name": "warehouse-ingestion",
+    "status": "idle"
+  },
+  {
+    "pid": 96316,
+    "cwd": "/home/user/projects/project-c",
+    "kind": "interactive",
+    "startedAt": 1785934742261,
+    "sessionId": "0c83fb72-ea61-d945-0c83-fb72ea61d945",
+    "name": "camera",
+    "status": "idle"
+  },
+  {
+    "pid": 10720,
+    "cwd": "/home/user/projects/project-d",
+    "kind": "interactive",
+    "startedAt": 1785941116453,
+    "sessionId": "0da740da-740d-a734-0da7-40da740da734",
+    "name": "project-d-62",
+    "status": "idle"
+  },
+  {
+    "pid": 68066,
+    "cwd": "/home/user/projects/project-b",
+    "kind": "interactive",
+    "startedAt": 1786123785216,
+    "sessionId": "0eca8641-fdb9-7523-0eca-8641fdb97523",
+    "name": "project-b-a4",
+    "status": "waiting",
+    "waitingFor": "permission prompt"
+  },
+  {
+    "pid": 15765,
+    "id": "0fedcba9",
+    "cwd": "/home/user/projects/tarmac/.claude/worktrees/task0-findings",
+    "kind": "background",
+    "startedAt": 1786226016130,
+    "sessionId": "0fedcba9-8765-4312-0fed-cba987654312",
+    "name": "tarmac-t0",
+    "status": "busy",
+    "state": "working"
+  },
+  {
+    "pid": 17037,
+    "id": "11111111",
+    "cwd": "/home/user/projects/tarmac/.claude/worktrees/task0-findings",
+    "kind": "background",
+    "startedAt": 1786226262541,
+    "sessionId": "11111111-1111-1101-1111-111111111101",
+    "name": "tarmac-a3-done-test",
+    "status": "idle",
+    "state": "done"
+  }
+]
