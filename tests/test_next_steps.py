@@ -3,7 +3,9 @@
 import json
 
 from tarmac import db as dbm
-from tarmac.collect import TargetResult, apply_next_steps, apply_result, fetch_next_steps
+from tarmac.collect import (
+    QUEUE_SENTINEL, TargetResult, apply_next_steps, apply_result, parse_queue,
+)
 from tarmac.config import Target, tarmac_home
 from tarmac.model import parse_agents_json
 
@@ -23,20 +25,20 @@ def seed(conn):
     return t
 
 
-def test_fetch_local_reads_and_truncates(tmp_path, monkeypatch):
+def test_queue_is_parsed_from_the_collection_output(tmp_path, monkeypatch):
+    """The queue now rides back on the same round trip as `agents --json`,
+    instead of a second SSH connection per cycle (1440/day, all empty)."""
     monkeypatch.setenv("TARMAC_HOME", str(tmp_path))
-    q = tarmac_home() / "next-steps.jsonl"
-    q.parent.mkdir(parents=True, exist_ok=True)
-    q.write_text(
-        json.dumps({"session_id": "abc12345-1111-2222-3333-444455556666",
-                    "next_step": "revisar o PR", "at": 1}) + "\n"
+    stdout = (
+        '[]\n' + QUEUE_SENTINEL + '\n'
+        + json.dumps({"session_id": "abc12345-1111-2222-3333-444455556666",
+                      "next_step": "revisar o PR", "at": 1}) + "\n"
         + "linha inválida\n"
     )
-    t = make_target()
-    entries = fetch_next_steps(t)
-    assert len(entries) == 1
-    assert q.read_text() == ""          # drained
-    assert fetch_next_steps(t) == []    # idempotent
+    payload, _, queue = stdout.partition(QUEUE_SENTINEL)
+    entries = parse_queue(queue)
+    assert payload.strip() == "[]"
+    assert len(entries) == 1 and entries[0]["next_step"] == "revisar o PR"
 
 
 def test_apply_matches_by_uuid_and_respects_manual(tmp_path, monkeypatch):

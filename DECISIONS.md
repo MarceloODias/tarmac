@@ -156,6 +156,31 @@ fix de propósito e confirmo que a suíte falha. Foi assim que descobri que minh
 primeira hipótese sobre o crash do `logs` estava errada (a suíte passava com o
 bug reintroduzido), o que me levou à causa real.
 
+## Auditoria independente de custo (2026-08-10)
+
+29. Um agente auditor varreu o projeto atrás de gasto desnecessário. **Veredito:
+    nenhum caminho ativo gasta tokens sem o Marcelo pedir** — o hook está
+    desinstalado nas duas máquinas e as filas estão vazias. Achados corrigidos:
+    - **Fallback de data rodava no modelo default (Opus 1M) e o TUI re-abria o
+      campo em laço** a cada falha de parsing: cada tentativa era outra chamada.
+      Agora usa Haiku explicitamente e **não** re-tenta sozinho — mostra os
+      formatos aceitos.
+    - **Travas 2 e 3 do hook eram fúráveis por corrida** (o auditor mediu 13, 5,
+      6, 4 e 9 chamadas onde devia ser 1; e o teto de 3 estourando até 6).
+      Agora há lock atômico por `mkdir` (não há `flock` no macOS), contador
+      escrito via `tmp + mv`, e `.seen` podado.
+    - **Trava 4 tinha dois furos silenciosos**: payload sem `cwd` ignorava a
+      deny-list, e prefixo com `~` nunca era expandido. Agora `cwd` ausente com
+      deny-list **nega**, e o `~` é expandido.
+    - **1440 conexões SSH/dia inúteis**: o drain da fila abria uma segunda
+      conexão por ciclo mesmo com a fila vazia. Agora a fila volta **na mesma
+      viagem** da coleta (sentinela na saída) — o que também tirou I/O de rede
+      de dentro da transação SQLite, que segurava lock do banco por até 10s.
+    - Registrado como informação, fora do escopo do tarmac: **três cron jobs de
+      terceiros na EC2** (`lld-agent`, `benji-dp-agent`, `ssp-model-integration`)
+      rodam `claude --print` headless todo dia e gastam tokens — decisão do
+      Marcelo o que fazer com eles.
+
 ## Fora do escopo desta entrega (deliberado)
 
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.

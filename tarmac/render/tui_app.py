@@ -510,8 +510,11 @@ class TarmacApp(App):
                     end_of_day_hour=self.config.settings.end_of_day_hour,
                 )
             except DateParseError as e:
-                self.notify(str(e), severity="error")  # keep field open? re-prompt
-                self._prompt_due(title, hide)
+                # NO automatic re-prompt: each retry is another `claude -p`, and
+                # a user fighting the parser would spend one call per attempt.
+                # Show what is accepted and let them press the key again.
+                from ..dates import ACCEPTED_FORMS
+                self.notify(f"{e}\nformatos: {ACCEPTED_FORMS}", severity="error")
                 return
             if row.kind == "task":
                 task_id = int(row.session_id.split(":", 1)[1])

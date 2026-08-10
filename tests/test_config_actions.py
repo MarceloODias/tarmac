@@ -25,7 +25,7 @@ def make_row(**kw) -> Row:
 def test_local_collect_command():
     t = Target(id="mac", transport="local")
     cmd = build_command(t)
-    assert cmd[-1] == "claude agents --json --all"
+    assert cmd[-1].startswith("claude agents --json --all")
 
 
 def test_local_collect_command_with_config_dir():
@@ -40,7 +40,7 @@ def test_ssh_collect_command():
     assert cmd[0] == "ssh"
     assert "BatchMode=yes" in cmd
     assert "ConnectTimeout=5" in cmd
-    assert cmd[-1] == "/home/u/.local/bin/claude agents --json --all"
+    assert cmd[-1].startswith("/home/u/.local/bin/claude agents --json --all")
 
 
 def test_ssh_user_prefix():

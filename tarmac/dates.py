@@ -22,6 +22,13 @@ class DateParseError(ValueError):
     pass
 
 
+# The fallback exists to rescue an odd phrasing, not to spend a frontier model
+# on date arithmetic. Overridable via settings if someone wants otherwise.
+FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+
+ACCEPTED_FORMS = "5h · 30min · 2d · amanhã · na segunda · sexta 14h · dia 15 · 15/09"
+
+
 WEEKDAYS = {
     # pt (full + abbreviated)
     "segunda": 0, "segunda-feira": 0, "seg": 0,
@@ -153,8 +160,13 @@ def parse_with_fallback(
     default_hour: int = 9,
     end_of_day_hour: int = 18,
     claude_bin: str = "claude",
+    model: str = FALLBACK_MODEL,
 ) -> datetime:
-    """Regex first; `claude -p` only when it misses (SPEC §6.2)."""
+    """Regex first; `claude -p` only when it misses (SPEC §6.2).
+
+    Pinned to a cheap model on purpose: without --model this inherits whatever
+    the user's default is (here, Opus 1M) to convert four words into a date.
+    """
     now = now or datetime.now().astimezone()
     try:
         return parse_natural(text, now, default_hour, end_of_day_hour)
@@ -166,7 +178,7 @@ def parse_with_fallback(
     )
     try:
         proc = subprocess.run(
-            [claude_bin, "-p", "--output-format", "json", prompt],
+            [claude_bin, "-p", "--model", model, "--output-format", "json", prompt],
             capture_output=True, text=True, timeout=60,
         )
         result = json.loads(proc.stdout).get("result", "").strip()

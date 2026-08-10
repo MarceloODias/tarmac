@@ -47,24 +47,56 @@ CWD=$(read_field cwd)
 
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
-# --- guard 2: one summary per session, ever ---------------------------------
-if [ -f "$SEEN" ] && grep -qxF "$SESSION_ID" "$SEEN" 2>/dev/null; then
-  exit 0
-fi
+expand_home() {  # a deny prefix written as ~/foo was silently inert before
+  case "$1" in "~/"*) printf '%s' "$HOME/${1#\~/}" ;; "~") printf '%s' "$HOME" ;;
+                   *) printf '%s' "$1" ;; esac
+}
 
-# --- guard 4: cwd allow/deny ------------------------------------------------
+# --- guard 4: cwd allow/deny (checked before taking the lock) ----------------
 if [ -n "${TARMAC_NEXTSTEP_ONLY:-}" ]; then
   allowed=0
   IFS=':' read -ra ONLY <<< "$TARMAC_NEXTSTEP_ONLY"
   for prefix in "${ONLY[@]:-}"; do
-    [ -n "$prefix" ] && case "$CWD" in "$prefix"*) allowed=1;; esac
+    [ -n "$prefix" ] || continue
+    prefix=$(expand_home "$prefix")
+    case "$CWD" in "$prefix"*) allowed=1;; esac
   done
   [ "$allowed" = "1" ] || exit 0
 fi
-IFS=':' read -ra EXCLUDES <<< "${TARMAC_NEXTSTEP_EXCLUDE:-}"
-for prefix in "${EXCLUDES[@]:-}"; do
-  [ -n "$prefix" ] && case "$CWD" in "$prefix"*) exit 0;; esac
+if [ -n "${TARMAC_NEXTSTEP_EXCLUDE:-}" ]; then
+  # unknown cwd + a deny-list means we cannot prove this is allowed: DENY.
+  # (payloads without `cwd` used to slip past every exclusion silently)
+  [ -n "$CWD" ] || exit 0
+  IFS=':' read -ra EXCLUDES <<< "$TARMAC_NEXTSTEP_EXCLUDE"
+  for prefix in "${EXCLUDES[@]:-}"; do
+    [ -n "$prefix" ] || continue
+    prefix=$(expand_home "$prefix")
+    case "$CWD" in "$prefix"*) exit 0;; esac
+  done
+fi
+
+# --- lock: guards 2 and 3 are read-modify-write, so they need mutual ---------
+# exclusion. `mkdir` is the portable atomic primitive (no flock on macOS).
+# Concurrent session ends used to blow past the daily cap and re-summarise the
+# same session several times.
+LOCK="$STATE_DIR/next-steps.lock"
+acquired=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if mkdir "$LOCK" 2>/dev/null; then acquired=1; break; fi
+  # steal a lock left behind by a killed hook (older than a minute)
+  if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+  fi
+  sleep 0.2
 done
+# could not lock: skip this one rather than risk a double spend
+[ "$acquired" = "1" ] || exit 0
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+# --- guard 2: one summary per session, ever ---------------------------------
+if [ -f "$SEEN" ] && grep -qxF "$SESSION_ID" "$SEEN" 2>/dev/null; then
+  exit 0
+fi
 
 # --- guard 3: daily cap -----------------------------------------------------
 TODAY=$(date +%Y-%m-%d)
@@ -80,7 +112,12 @@ fi
 
 # Claim the slot BEFORE spending anything: crash-safe against retries.
 printf '%s\n' "$SESSION_ID" >> "$SEEN"
-printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER"
+printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER.tmp" && mv -f "$COUNTER.tmp" "$COUNTER"
+# keep .seen bounded: it was append-only and grew forever
+if [ "$(wc -l < "$SEEN" 2>/dev/null || echo 0)" -gt 2000 ]; then
+  tail -n 1000 "$SEEN" > "$SEEN.tmp" && mv -f "$SEEN.tmp" "$SEEN"
+fi
+rmdir "$LOCK" 2>/dev/null; trap - EXIT
 
 # The API call runs detached — the hook must never hold up shutdown (SPEC §10).
 (

@@ -17,7 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import db as dbm
@@ -25,6 +25,7 @@ from .config import Config, Target, tarmac_home
 from .model import Session, parse_agents_json
 
 NEXT_STEPS_REMOTE = "~/.tarmac/next-steps.jsonl"
+QUEUE_SENTINEL = "===TARMAC-NEXT-STEPS==="
 
 TARGET_TIMEOUT_S = 15
 BACKOFF_MS = [60_000, 120_000, 300_000]  # SPEC §4.4
@@ -86,10 +87,25 @@ def resolve_local_bin(claude_bin: str) -> str:
 
 
 def build_command(target: Target) -> list[str]:
-    """The exact collection command per transport (SPEC §4.2)."""
+    """The exact collection command per transport (SPEC §4.2), plus the
+    next_step queue in the SAME round trip.
+
+    Draining the queue used to be a second SSH connection per cycle — 1440
+    connections a day, all of them empty while the hook is uninstalled. One
+    command, one connection, and no network I/O inside the DB transaction.
+    """
     binary = (resolve_local_bin(target.claude_bin)
               if target.transport == "local" else target.claude_bin)
-    inner = f"{binary} agents --json --all"
+    # `: > file` is a special builtin: a failed redirection aborts the whole
+    # shell, so a missing queue file used to break the entire collection.
+    inner = (
+        f"{binary} agents --json --all || exit $?; "
+        f"echo '{QUEUE_SENTINEL}'; "
+        f"if [ -f {NEXT_STEPS_REMOTE} ]; then "
+        f"cat {NEXT_STEPS_REMOTE} 2>/dev/null; "
+        f"cp /dev/null {NEXT_STEPS_REMOTE} 2>/dev/null; "
+        f"fi; true"
+    )
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
     if target.transport == "local":
@@ -110,6 +126,7 @@ class TargetResult:
     sessions: list[Session] | None  # None = collection failed
     error: str | None = None
     error_kind: str | None = None   # 'offline' | 'error'
+    next_steps: list[dict] = field(default_factory=list)  # drained in the same trip
 
 
 def collect_target(target: Target) -> TargetResult:
@@ -133,11 +150,28 @@ def collect_target(target: Target) -> TargetResult:
             error=(proc.stderr or proc.stdout or "").strip()[:500] or f"exit {proc.returncode}",
             error_kind=kind,
         )
+    payload, _, queue = proc.stdout.partition(QUEUE_SENTINEL)
     try:
-        sessions = parse_agents_json(proc.stdout)
+        sessions = parse_agents_json(payload)
     except ValueError as e:
         return TargetResult(target, None, error=f"JSON inválido: {e}", error_kind="error")
-    return TargetResult(target, sessions)
+    return TargetResult(target, sessions, next_steps=parse_queue(queue))
+
+
+def parse_queue(text: str) -> list[dict]:
+    """JSONL written by the SessionEnd hook; junk lines are skipped, never fatal."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and entry.get("session_id") and entry.get("next_step"):
+            out.append(entry)
+    return out
 
 
 def _reset_dead_control_socket(target: Target) -> None:
@@ -272,45 +306,6 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         )
 
 
-def fetch_next_steps(target: Target) -> list[dict]:
-    """Drain the machine-local queue written by the SessionEnd hook (SPEC §10).
-
-    Read-then-truncate; on any failure returns [] and leaves the file alone
-    (the next cycle retries). Lines are JSON: {session_id, next_step, at}.
-    """
-    try:
-        if target.transport == "local":
-            path = tarmac_home() / "next-steps.jsonl"
-            if not path.exists():
-                return []
-            text = path.read_text()
-            path.write_text("")
-        else:
-            host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
-            proc = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
-                 f"cat {NEXT_STEPS_REMOTE} 2>/dev/null && : > {NEXT_STEPS_REMOTE}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if proc.returncode != 0:
-                return []
-            text = proc.stdout
-    except Exception:
-        return []
-    out = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(entry, dict) and entry.get("session_id") and entry.get("next_step"):
-            out.append(entry)
-    return out
-
-
 def apply_next_steps(conn: sqlite3.Connection, target: Target, entries: list[dict]) -> None:
     for entry in entries:
         uuid = str(entry["session_id"])
@@ -351,8 +346,8 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     with conn:
         for r in results:
             apply_result(conn, r)
-            if r.sessions is not None:  # only drain machines we can reach
-                apply_next_steps(conn, r.target, fetch_next_steps(r.target))
+            if r.next_steps:  # already drained in the collection round trip
+                apply_next_steps(conn, r.target, r.next_steps)
         dbm.prune_service_sessions(conn)
         dbm.kv_set(conn, "last_collect_at", str(now))
     return results
