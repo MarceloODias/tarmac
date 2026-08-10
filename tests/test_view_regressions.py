@@ -139,3 +139,22 @@ async def test_resolve_on_blocked_row_explains_itself(blocked_app):
         await pilot.pause()
         assert notes, "tecla x não deu retorno nenhum ao usuário"
         assert "bloqueada" in notes[0].lower() or "vencid" in notes[0].lower()
+
+
+async def test_error_footer_shows_the_reason(tmp_path, monkeypatch):
+    """A bare ⚠ next to (stale) rows is not enough: the footer must name the
+    actual failure, or the user has to go ask someone what broke."""
+    monkeypatch.setenv("TARMAC_HOME", str(tmp_path))
+    conn = dbm.connect(tmp_path / "tarmac.db")
+    t = target()
+    apply_result(conn, TargetResult(
+        t, None, error="sh: claude: command not found", error_kind="error"))
+    dbm.kv_set(conn, "last_collect_at", str(dbm.now_ms()))
+    conn.commit()
+
+    app = TarmacApp(config_for(t))
+    async with app.run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        from textual.widgets import Static
+        rendered = str(app.query_one("#badge", Static).render())
+        assert "command not found" in rendered, rendered

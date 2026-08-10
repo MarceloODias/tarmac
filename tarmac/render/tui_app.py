@@ -276,7 +276,11 @@ class TarmacApp(App):
             if tl.state == "offline":
                 extra += f"   [dim]{tl.label} {tr(locale, 'offline_for', ago=format_duration(tl.age_s or 0))}[/dim]"
             elif tl.state == "error":
-                extra += f"   [red]⚠ {tl.label}[/red]"
+                # show WHY, not just that something is wrong: a bare ⚠ next to
+                # (stale) rows sent Marcelo asking three times what broke.
+                reason = (tl.last_error or "").strip().splitlines()[-1:] or [""]
+                detail = reason[0][:70].replace("[", r"\[")
+                extra += f"   [red]⚠ {tl.label}: {detail}[/red]"
         badge_widget.update(
             f"[{BADGE_STYLE.get(severity, '')}]  {text}  [/]" + extra
         )
