@@ -1,11 +1,14 @@
-#!/bin/bash
+#!/bin/bash -l
 # Launcher used by the iTerm "tarmac" profile (Custom Command).
 #
-# Why a script instead of the binary directly: if the panel dies, the session
-# would close instantly and the error would vanish with it. This keeps the
-# window open so the failure is readable. It is NOT an interactive shell —
-# no rc files, no functions, no keystroke race (that is what produced
-# `i~/.local/bin/tarmac` and, most likely, the FUNCNEST error).
+# `-l` (login shell) on purpose: iTerm's Custom Command runs the program with
+# launchd's minimal PATH, and the collector shells out to `claude`. Without a
+# login shell the local target failed with "sh: claude: command not found" and
+# every row rendered as (stale) — the panel was honest, the environment was
+# broken. A login shell is NOT an interactive one: no keystroke race, which is
+# what produced `i~/.local/bin/tarmac` and, most likely, the FUNCNEST error.
+#
+# Belt and braces: targets.yaml should still use absolute claude_bin paths.
 exec 2>&1
 "$HOME/.local/bin/tarmac" render --format tui
 status=$?

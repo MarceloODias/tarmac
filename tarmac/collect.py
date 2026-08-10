@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import db as dbm
 from .config import Config, Target, tarmac_home
@@ -58,9 +61,35 @@ def classify_failure(stderr: str) -> str:
     return "error"
 
 
+# Where `claude` usually lives. The panel is launched by the terminal emulator,
+# not by an interactive shell, so PATH can be launchd's minimal one and a bare
+# `claude` fails with "command not found" — which marked every row (stale).
+LOCAL_CLAUDE_CANDIDATES = (
+    "~/.local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "~/.claude/local/claude",
+)
+
+
+def resolve_local_bin(claude_bin: str) -> str:
+    """Absolute path wins; otherwise trust PATH, then look in the usual places."""
+    if "/" in claude_bin:
+        return claude_bin
+    if shutil.which(claude_bin):
+        return claude_bin
+    for candidate in LOCAL_CLAUDE_CANDIDATES:
+        path = Path(candidate).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return claude_bin  # let it fail loudly, with a clear stderr
+
+
 def build_command(target: Target) -> list[str]:
     """The exact collection command per transport (SPEC §4.2)."""
-    inner = f"{target.claude_bin} agents --json --all"
+    binary = (resolve_local_bin(target.claude_bin)
+              if target.transport == "local" else target.claude_bin)
+    inner = f"{binary} agents --json --all"
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
     if target.transport == "local":

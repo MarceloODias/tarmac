@@ -117,3 +117,25 @@ def test_no_code_path_reads_claude_projects():
         capture_output=True, text=True,
     )
     assert grep.stdout == "", f"código lendo fonte proibida:\n{grep.stdout}"
+
+
+def test_local_bin_resolved_when_path_is_minimal(tmp_path, monkeypatch):
+    """The panel runs with launchd's minimal PATH: a bare `claude` must still
+    be found, or every row silently renders as (stale)."""
+    from tarmac import collect as collect_mod
+
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/bash\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(collect_mod.shutil, "which", lambda _: None)
+    monkeypatch.setattr(collect_mod, "LOCAL_CLAUDE_CANDIDATES", (str(fake),))
+
+    t = Target(id="mac", transport="local")
+    assert collect_mod.build_command(t)[-1].startswith(str(fake))
+
+
+def test_absolute_claude_bin_is_never_second_guessed(monkeypatch):
+    from tarmac import collect as collect_mod
+    monkeypatch.setattr(collect_mod.shutil, "which", lambda _: None)
+    t = Target(id="mac", transport="local", claude_bin="/custom/claude")
+    assert collect_mod.build_command(t)[-1].startswith("/custom/claude")

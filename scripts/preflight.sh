@@ -46,6 +46,19 @@ else
   printf '  ✓ hook off\n'
 fi
 
+step "coleta funciona no ambiente pobre em que o painel roda"
+# iTerm's Custom Command gives launchd's minimal PATH; the collector shells out
+# to `claude`. This is the check that catches "sh: claude: command not found",
+# which silently turned every row into (stale).
+if env -i HOME="$HOME" TERM=dumb "$BIN" collect --force >/tmp/tarmac-env.$$ 2>&1 \
+   && ! grep -qi "command not found\|error" /tmp/tarmac-env.$$; then
+  printf '  ✓ coleta OK com PATH mínimo\n'
+else
+  printf '  ✗ coleta falha com PATH mínimo (use claude_bin absoluto):\n'
+  sed 's/^/      /' /tmp/tarmac-env.$$ | head -5; fail=1
+fi
+rm -f /tmp/tarmac-env.$$
+
 step "abertura do painel não depende de shell interativo"
 PROFILE="$HOME/Library/Application Support/iTerm2/DynamicProfiles/tarmac.json"
 if [ -f "$PROFILE" ]; then
