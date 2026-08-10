@@ -42,8 +42,10 @@ case "$script" in
 esac
 ''')
     (fake_bin / "osascript").chmod(0o755)
+    claude_log = tmp_path / "claude.log"
     (fake_bin / "claude").write_text(
-        '#!/bin/bash\necho "logs [Bash] com \\033[32mcores\\033[0m e [colchetes]"\n')
+        f'#!/bin/bash\necho "$@" >> "{claude_log}"\n'
+        'echo "logs [Bash] com \\033[32mcores\\033[0m e [colchetes]"\n')
     (fake_bin / "claude").chmod(0o755)
     (fake_bin / "ssh").write_text('#!/bin/bash\necho "saida remota"\n')
     (fake_bin / "ssh").chmod(0o755)
@@ -91,11 +93,11 @@ esac
     conn.commit()
 
     config = Config(targets=[local, remote], settings=Settings(stale_after_s=10_000))
-    return config, tmp_path, calls
+    return config, tmp_path, calls, claude_log
 
 
 async def test_every_key_on_every_row_never_crashes(panel):
-    config, tmp_path, _ = panel
+    config, tmp_path, _, _ = panel
     app = TarmacApp(config)
     async with app.run_test(size=(160, 60)) as pilot:
         await pilot.pause()
@@ -118,7 +120,7 @@ async def test_every_key_on_every_row_never_crashes(panel):
 
 
 async def test_open_records_handle_and_logs_render(panel):
-    config, tmp_path, calls = panel
+    config, tmp_path, calls, claude_log = panel
     app = TarmacApp(config)
     async with app.run_test(size=(160, 60)) as pilot:
         await pilot.pause()
@@ -153,7 +155,7 @@ async def test_open_records_handle_and_logs_render(panel):
 
 
 async def test_service_row_is_not_selectable(panel):
-    config, _, _ = panel
+    config, _, _, _ = panel
     app = TarmacApp(config)
     async with app.run_test(size=(160, 60)) as pilot:
         await pilot.pause()
@@ -161,3 +163,28 @@ async def test_service_row_is_not_selectable(panel):
         ids = [o.id for i in range(ol.option_count)
                if (o := ol.get_option_at_index(i)) is not None]
         assert "ec2|svc00001" not in ids  # service sessions are counted, not listed
+
+
+async def test_remove_asks_and_then_calls_claude_rm(panel):
+    """R drops a dead row from the agent view — the 44-day zombie case."""
+    config, tmp_path, calls, claude_log = panel
+    app = TarmacApp(config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        ol = app.query_one("#sessions", OptionList)
+        ol.highlighted = next(
+            i for i in range(ol.option_count)
+            if (o := ol.get_option_at_index(i)) is not None and o.id == "mac|blk00001"
+        )
+        await pilot.press("R")
+        await pilot.pause()
+        await pilot.press("escape")          # cancelling must not remove anything
+        await app.workers.wait_for_complete()
+        assert "rm blk00001" not in (claude_log.read_text() if claude_log.exists() else "")
+
+        await pilot.press("R")
+        await pilot.pause()
+        await pilot.press("enter")           # confirm
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "rm blk00001" in claude_log.read_text()

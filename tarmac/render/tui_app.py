@@ -99,6 +99,10 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
     if row.eff_state == "blocked":
         parts.append("⚠ permission prompt" if row.permission_prompt
                       else (row.waiting_for or "blocked"))
+        if row.kind == "background" and row.pid is None:
+            # no live worker: attach may fail ("no saved transcript"). Say the
+            # fact, not a guess — R removes it from the list.
+            parts.append("sem processo")
     if row.next_step:
         parts.append(f"→ {row.next_step}")
     if row.checklist:
@@ -214,6 +218,7 @@ class TarmacApp(App):
         Binding("l", "logs", "logs"),
         Binding("x", "resolve", "resolver"),
         Binding("S", "stop", "parar"),
+        Binding("R", "remove", "remover da lista"),
         Binding("u", "refresh", "atualizar"),
         Binding("q", "quit", "sair"),
     ]
@@ -238,7 +243,10 @@ class TarmacApp(App):
     # ---------- data ----------
 
     def refresh_data(self) -> None:
-        self.run_worker(self._collect_and_render, thread=True, exclusive=True)
+        # own group: an exclusive refresh must never cancel an action the
+        # user just fired (it silently killed opens, stops and removals)
+        self.run_worker(self._collect_and_render, thread=True, exclusive=True,
+                        group='collect')
 
     def _collect_and_render(self) -> None:
         conn = connect()  # thread-local connection
@@ -354,7 +362,7 @@ class TarmacApp(App):
             msg = done_msg or (str(result) if result else None)
             if msg:
                 self.call_from_thread(self.notify, msg)
-        self.run_worker(work, thread=True)
+        self.run_worker(work, thread=True, group='actions')
 
     # ---------- actions ----------
 
@@ -608,10 +616,47 @@ class TarmacApp(App):
                 collect(self.config, conn, force=True)
                 self.call_from_thread(self.notify, msg or "parado")
                 self.call_from_thread(self.refresh_data)
-            self.run_worker(work, thread=True)
+            self.run_worker(work, thread=True, group='actions')
 
         self.push_screen(
             ConfirmPrompt(f"Parar {row.display_name}?"), handle)
+
+    def action_remove(self) -> None:
+        """`R`: drop a session from the agent view (`claude rm`).
+
+        The case that forced this: a session listed as blocked for 44 days that
+        can never be attached — it was stopped before its first response, so it
+        has no transcript. It is not work waiting on you, it is a dead row
+        holding the badge hostage."""
+        cur = self._current()
+        if cur is None:
+            return
+        target, row = cur
+        if row.kind == "task":
+            self.notify("tarefa: use 'x' para resolver", severity="warning")
+            return
+        if not row.short_id:
+            self.notify("sessão interativa não pode ser removida da lista",
+                        severity="warning")
+            return
+
+        def handle(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def work():
+                proc = actions.remote_claude(target, "rm", row.short_id)
+                msg = (proc.stdout or proc.stderr).strip()
+                collect(self.config, connect(), force=True)
+                self.call_from_thread(self.notify, msg or "removido")
+                self.call_from_thread(self.refresh_data)
+            self.run_worker(work, thread=True, group='actions')
+
+        self.push_screen(ConfirmPrompt(
+            f"Remover {row.display_name[:40]} da lista?\n"
+            "Pode apagar o worktree criado pela sessão, incluindo alterações "
+            f"não commitadas.\nPara reiniciá-la do zero: claude respawn {row.short_id}"
+        ), handle)
 
     def action_refresh(self) -> None:
         def work():
@@ -619,7 +664,7 @@ class TarmacApp(App):
             collect(self.config, conn, force=True)
             view = build_view(self.config, conn)
             self.call_from_thread(self._render, view)
-        self.run_worker(work, thread=True)
+        self.run_worker(work, thread=True, group='actions')
 
 
 def run_tui(config: Config, interval_s: int = 60) -> None:

@@ -31,6 +31,7 @@ class Row:
     waiting_for: str | None
     gone: bool
     stale: bool                  # data from an offline target's last snapshot
+    pid: int | None = None       # absent = no live worker behind this session
     wait_s: int | None = None    # seconds blocked, None if not blocked
     wait_uncertain: bool = False  # blocked during an offline window -> ">="
     due_at: int | None = None
@@ -187,6 +188,7 @@ def build_view(
             waiting_for=r["waiting_for"],
             gone=bool(r["gone"]),
             stale=stale,
+            pid=r["pid"],
             due_at=meta["due_at"] if meta else None,
             due_label=meta["due_label"] if meta else None,
             hidden_until_due=bool(meta["hide_until_due"]) if meta else False,
