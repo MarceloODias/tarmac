@@ -39,12 +39,26 @@ class SessionClassRule:
 
     def matches(self, cwd: str | None, name: str | None) -> bool:
         if self.match_cwd is not None:
-            if not cwd or not fnmatch.fnmatch(cwd, self.match_cwd):
+            if not cwd or not self._cwd_matches(cwd):
                 return False
         if self.match_name is not None:
             if not name or not re.search(self.match_name, name):
                 return False
         return self.match_cwd is not None or self.match_name is not None
+
+    def _cwd_matches(self, cwd: str) -> bool:
+        """`/dir/**` means "that tree", which includes /dir itself.
+
+        A session started in the very directory (backend-agent lives in
+        ~/ai-agent-skills, not below it) otherwise leaks into the main list.
+        The sibling /ai-agent-skills-old must still NOT match."""
+        pattern = self.match_cwd or ""
+        cwd = cwd.rstrip("/")
+        if fnmatch.fnmatch(cwd, pattern):
+            return True
+        if pattern.endswith("/**"):
+            return cwd == pattern[:-3].rstrip("/")
+        return False
 
 
 @dataclass

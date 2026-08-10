@@ -209,6 +209,13 @@ def build_view(
             view.scheduled.append(row)
             continue
 
+        # A session that vanished from the --json is NOT live any more: its last
+        # known state is a memory, not a fact. Rendering it as working/blocked
+        # kept dead rows in the list and — worse — inflated the badge forever.
+        # Intent (a reminder, a pin) is mine and does outlive the listing.
+        if row.gone and not row.pinned:
+            continue
+
         if eff == BLOCKED:
             row.wait_s, row.wait_uncertain = _wait_of(conn, r, now)
             view.blocked.append(row)
@@ -217,11 +224,9 @@ def build_view(
         elif eff == WORKING:
             view.working.append(row)
         elif eff in TERMINAL_STATES:
-            if not row.gone:
-                view.done.append(row)
-        elif eff == IDLE and not row.gone:
+            view.done.append(row)
+        elif eff == IDLE:
             view.other.append(row)
-        # gone sessions without due/pin simply don't render (meta survives in DB)
 
     # standalone tasks (intent without a session): live in AGENDADO, rise to
     # PRA HOJE when overdue, open by starting Claude Code in their folder

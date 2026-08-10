@@ -570,11 +570,23 @@ class TarmacApp(App):
         if row.kind == "task":
             from ..tasks import resolve_task
             resolve_task(self.conn, int(row.session_id.split(":", 1)[1]))
-        else:
-            from .. import db as dbm
-            dbm.upsert_meta(self.conn, row.target_id, row.session_id,
-                            resolved_at=dbm.now_ms())
-            self.conn.commit()
+            self.refresh_data()
+            return
+        if not row.overdue:
+            # `x` clears a reminder I set; it cannot clear a session that is
+            # genuinely blocked — only answering it can. Say so, never no-op.
+            if row.eff_state == "blocked":
+                self.notify("sessão bloqueada de verdade: responda com Enter, "
+                            "ou adie com 'a'. 'x' só resolve lembrete vencido.",
+                            severity="warning")
+            else:
+                self.notify("nada a resolver aqui — 'x' vale para lembrete vencido",
+                            severity="warning")
+            return
+        from .. import db as dbm
+        dbm.upsert_meta(self.conn, row.target_id, row.session_id,
+                        resolved_at=dbm.now_ms())
+        self.conn.commit()
         self.refresh_data()
 
     def action_stop(self) -> None:
