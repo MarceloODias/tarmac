@@ -67,8 +67,8 @@ async def test_open_action_from_worker_thread(app_env, monkeypatch, tmp_path):
     # regression: sqlite connections are thread-bound; the open action runs in
     # a worker thread and must NOT reuse the app's main-thread connection
     import tarmac.actions as actions_mod
-    monkeypatch.setattr(actions_mod, "create_tab",
-                        lambda cmd, win=None: ("HANDLE-1", "7", "ok"))
+    monkeypatch.setattr(actions_mod, "create_window",
+                        lambda cmd: ("HANDLE-1", "ok"))
     monkeypatch.setattr(actions_mod, "focus_tab", lambda h: "missing")
     app = TarmacApp(app_env)
     async with app.run_test(size=(120, 40)) as pilot:
@@ -79,20 +79,6 @@ async def test_open_action_from_worker_thread(app_env, monkeypatch, tmp_path):
         conn = dbm.connect(tmp_path / "tarmac.db")
         row = conn.execute("SELECT handle FROM terminal_handles").fetchone()
         assert row is not None and row["handle"] == "HANDLE-1"
-
-
-async def test_logview_survives_brackets_and_ansi(app_env):
-    # regression: log output contains literal [brackets] and ANSI codes; the
-    # modal must never feed them to the markup parser (MarkupError crash)
-    from tarmac.render.tui_app import LogView
-    evil = "tool_use [Bash] rodando\n\x1b[32mverde\x1b[0m [not-a-tag oops\n[/close]"
-    app = TarmacApp(app_env)
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.push_screen(LogView("logs · teste", evil))
-        await pilot.pause()
-        assert isinstance(app.screen, LogView)
-        await pilot.press("escape")
 
 
 async def test_wide_terminal_gets_wide_names(app_env):

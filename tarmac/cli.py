@@ -13,7 +13,7 @@ import sys
 from . import actions
 from . import db as dbm
 from .collect import collect, collect_if_stale
-from .config import Config, load_config
+from .config import Config, load_config, tarmac_home
 from .dates import DateParseError, human_confirmation, parse_with_fallback
 from .derive import build_view
 from .strings import tr
@@ -95,6 +95,13 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("gc-tabs", help="fecha abas resolvidas (SPEC §9.0.1)")
     p.add_argument("--idle-min", type=int, default=None)
 
+    p = sub.add_parser("hook", help="hook de next_step (custa API — off por padrão)")
+    p.add_argument("action", choices=["status", "install", "uninstall"])
+    p.add_argument("--exclude", default="", help="prefixos de cwd a ignorar (a:b)")
+    p.add_argument("--only", default="", help="rodar SÓ nestes prefixos de cwd (a:b)")
+    p.add_argument("--max-day", type=int, default=20, help="teto de chamadas por dia")
+    p.add_argument("--model", default="", help="modelo (default: haiku, barato)")
+
     p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
     p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
     p.add_argument("--due", help="prazo em linguagem natural (amanhã, segunda…)")
@@ -145,6 +152,29 @@ def main(argv: list[str] | None = None) -> None:
         idle = args.idle_min or config.settings.idle_tab_min
         closed = actions.close_resolved_tabs(conn, idle)
         print(f"{len(closed)} aba(s) fechada(s)")
+        return
+
+    if args.cmd == "hook":
+        from . import hookmgr
+        if args.action == "status":
+            installed, command = hookmgr.status()
+            print(f"instalado: {installed}")
+            if installed:
+                print(f"comando: {command}")
+            seen = tarmac_home() / "next-steps.seen"
+            count = tarmac_home() / "next-steps.count"
+            if seen.exists():
+                print(f"sessões já resumidas: {len(seen.read_text().splitlines())}")
+            if count.exists():
+                print(f"contador do dia: {count.read_text().strip()}")
+            return
+        if args.action == "install":
+            command = hookmgr.install(args.exclude, args.only, args.max_day, args.model)
+            print(f"instalado: {command}")
+            print("cada sessão encerrada gasta 1 chamada (transcript inteiro como "
+                  "input). Teto diário e dedupe por sessão estão ativos.")
+            return
+        print("removido" if hookmgr.uninstall() else "não estava instalado")
         return
 
     if args.cmd == "task":

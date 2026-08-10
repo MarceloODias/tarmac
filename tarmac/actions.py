@@ -68,6 +68,20 @@ def best_open_command(target: Target, row: Row) -> str:
     return attach_command(target, row)
 
 
+def logs_command(target: Target, row: Row) -> str:
+    """`claude logs` replays a full-screen TUI (cursor codes, not text), so it
+    only makes sense inside a real terminal — never in a widget."""
+    if not row.short_id:
+        raise ValueError("sessão sem short_id — logs só existem para background")
+    inner = f"{target.claude_bin} logs {shlex.quote(row.short_id)}"
+    if target.needs_config_dir_export:
+        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    if target.transport == "ssh":
+        host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
+        return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"
+    return inner
+
+
 def remote_claude(target: Target, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a claude subcommand on the target (logs/stop/rm — SPEC §9.2)."""
     inner = f"{target.claude_bin} {' '.join(shlex.quote(a) for a in args)}"
@@ -136,46 +150,32 @@ def focus_tab(handle: str) -> str:
     return out if ok else f"error: {out}"
 
 
-def create_tab(command: str, window_id: str | None = None) -> tuple[str | None, str | None, str]:
-    """Run `command` in a NEW TAB of the sessions window (creating that window
-    when it doesn't exist yet). Returns (session_handle, window_id, message).
+def create_window(command: str) -> tuple[str | None, str]:
+    """Run `command` in a brand-new iTerm window; return (session_handle, msg).
 
-    One dedicated window collects every session tab — the panel window stays
-    untouched and the desktop doesn't fill up with loose windows."""
+    Always a new window, by Marcelo's call: the panel is the queue now, so a
+    terminal is disposable — open it, use it, close it. Crucially this uses the
+    reference RETURNED by `create window` instead of `current window`: reading
+    "current" raced with the panel's own window and once wrote a session
+    command into the panel, killing it."""
     escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-    win_clause = f'''
-      set targetWindow to missing value
-      repeat with w in windows
-        if (id of w as text) is "{window_id or ''}" then
-          set targetWindow to w
-        end if
-      end repeat
-      if targetWindow is missing value then
-        create window with default profile
-        set targetWindow to current window
-      else
-        tell targetWindow to create tab with default profile
-      end if
-    '''
     script = f'''
     with timeout of 20 seconds
     tell application id "{ITERM_ID}"
-      {win_clause}
-      tell current session of targetWindow
+      set w to (create window with default profile)
+      tell current session of w
         write text "{escaped}"
         set h to id
       end tell
-      select targetWindow
       activate
-      return (id of targetWindow as text) & "|" & h
+      return h
     end tell
     end timeout
     '''
     ok, out = _osascript(script)
-    if ok and "|" in out:
-        win, handle = out.split("|", 1)
-        return handle, win, "ok"
-    return None, None, out
+    if ok and out:
+        return out, "ok"
+    return None, out
 
 
 def open_or_focus(
@@ -204,9 +204,8 @@ def open_or_focus(
         )
         conn.commit()
 
-    handle, win, msg = create_tab(command, dbm.kv_get(conn, "sessions_window_id"))
+    handle, msg = create_window(command)
     if handle:
-        dbm.kv_set(conn, "sessions_window_id", win or "")
         conn.execute(
             "INSERT INTO terminal_handles (target_id, session_id, handle, opened_at) "
             "VALUES (?, ?, ?, ?) "
@@ -256,9 +255,8 @@ def open_task(
             (target.id, key),
         )
         conn.commit()
-    handle, win, msg = create_tab(command, dbm.kv_get(conn, "sessions_window_id"))
+    handle, msg = create_window(command)
     if handle:
-        dbm.kv_set(conn, "sessions_window_id", win or "")
         conn.execute(
             "INSERT INTO terminal_handles (target_id, session_id, handle, opened_at) "
             "VALUES (?, ?, ?, ?) "

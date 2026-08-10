@@ -111,6 +111,53 @@
     (abrir-ou-focar, como sessões). Sem varredura de filesystem: o histórico
     do espelho é a única fonte de candidatos, coerente com a §2.
 
+## Incidente de custo (2026-08-09) e o que mudou no processo
+
+26. **O hook de `next_step` se auto-alimentava e queimou limite de uso.**
+    `claude -p --resume <id>` **continua** aquela sessão; ao terminar, ela
+    dispara `SessionEnd` de novo com o mesmo id → o hook rodava outra vez, em
+    laço, e **cada volta reenvia o transcript inteiro como input**. Evidência:
+    35 chamadas na fila da EC2 para apenas **5 sessões distintas** (~7 voltas
+    cada). Ações: hook **removido** do Mac e da EC2; reescrito com quatro
+    travas independentes (env `TARMAC_HOOK_GUARD` exportado ao processo filho,
+    dedupe por sessão, teto diário, allow/deny por cwd) e modelo barato (Haiku)
+    por padrão; **desligado por padrão**, instalável por `tarmac hook install`.
+    Sete testes com um `claude` falso que **reencena a recursão** provam que o
+    laço morre.
+27. **`logs` abre num terminal, não num widget.** `claude logs` devolve um
+    *replay de tela inteira* (74KB de escapes de cursor numa sessão real), não
+    texto: renderizar isso num widget é ilegível e derrubava o app. Agora `l`
+    abre uma janela do terminal com o comando.
+28. **Sempre uma janela nova** (decisão sua): o painel é a fila, então o
+    terminal virou descartável. Também corrige o bug em que o AppleScript lia
+    `current window` e, numa corrida, escrevia o comando **dentro da janela do
+    painel**, matando-o — agora usa a referência devolvida por `create window`.
+
+### Como eu passei a testar (a causa de você cair em bugs)
+
+Meus testes eram unitários com mocks, e **todo** bug que te atingiu vivia fora
+deles: o app real, o binário instalado, o processo filho. Agora são quatro
+camadas, e a última é um portão:
+
+- `tests/test_cli_smoke.py` — roda **o CLI como subprocesso**, um teste por
+  subcomando, com um `claude` falso. Pega import quebrado, argparse errado,
+  crash na invocação real.
+- `tests/test_e2e_panel.py` — **varre todas as teclas em todos os tipos de
+  linha** do painel real, com `osascript`/`ssh`/`claude` falsos no PATH. Pega
+  crash de worker, sqlite cross-thread, ação que não faz nada.
+- `tests/test_hook.py` — hook de ponta a ponta com o falso que reencena a
+  recursão.
+- `scripts/preflight.sh` — suíte + **o binário instalado respondendo** a cada
+  subcomando + hook off + regra de ouro da §2. **Não digo "está pronto" sem
+  esse portão verde.**
+
+E uma prática nova: **teste de mutação antes de declarar corrigido** — quebro o
+fix de propósito e confirmo que a suíte falha. Foi assim que descobri que minha
+primeira hipótese sobre o crash do `logs` estava errada (a suíte passava com o
+bug reintroduzido), o que me levou à causa real.
+
+## Fora do escopo desta entrega (deliberado)
+
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.
 - `Fechar abas resolvidas` existe como `tarmac gc-tabs` (nunca automático).
 - Notificações: nenhuma, por decisão fechada da §7.

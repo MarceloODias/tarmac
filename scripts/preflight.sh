@@ -1,0 +1,58 @@
+#!/bin/bash
+# Gate before saying "está pronto". Runs the suite, then exercises the REAL
+# installed binary — the layer where every bug that reached Marcelo lived.
+#
+#   ./scripts/preflight.sh          # tests + installed-binary smoke
+#   ./scripts/preflight.sh --install  # also refresh the uv tool install
+set -uo pipefail
+cd "$(dirname "$0")/.."
+fail=0
+step() { printf '\n\033[1m▍%s\033[0m\n' "$1"; }
+check() {
+  if "$@" >/tmp/tarmac-preflight.$$ 2>&1; then
+    printf '  ✓ %s\n' "$*"
+  else
+    printf '  ✗ %s\n' "$*"; sed 's/^/      /' /tmp/tarmac-preflight.$$ | tail -15; fail=1
+  fi
+  rm -f /tmp/tarmac-preflight.$$
+}
+
+step "suíte completa"
+if uv run pytest -q; then printf '  ✓ pytest\n'; else printf '  ✗ pytest\n'; fail=1; fi
+
+if [ "${1:-}" = "--install" ]; then
+  step "reinstalando o binário"
+  check uv tool install --force --from . tarmac
+fi
+
+step "binário instalado responde"
+BIN="$HOME/.local/bin/tarmac"
+if [ ! -x "$BIN" ]; then
+  printf '  ✗ %s não existe (rode com --install)\n' "$BIN"; fail=1
+else
+  check "$BIN" --help
+  check "$BIN" collect --force
+  check "$BIN" render --format swiftbar
+  check "$BIN" render --format tui --once
+  check "$BIN" stats
+  check "$BIN" task
+  check "$BIN" hook status
+fi
+
+step "hook de custo desligado por padrão"
+if "$BIN" hook status 2>/dev/null | grep -q "instalado: True"; then
+  printf '  ! hook INSTALADO — cada sessão encerrada gasta API\n'
+else
+  printf '  ✓ hook off\n'
+fi
+
+step "regra de ouro (§2): nada lê os arquivos internos do CLI"
+if grep -rn --include='*.py' -e '\.claude/projects' -e 'state\.json' tarmac/ >/dev/null 2>&1; then
+  printf '  ✗ código lendo fonte proibida\n'; fail=1
+else
+  printf '  ✓ só claude agents --json\n'
+fi
+
+printf '\n'
+if [ "$fail" = "0" ]; then printf '\033[32mpreflight OK\033[0m\n'; else printf '\033[31mpreflight FALHOU\033[0m\n'; fi
+exit "$fail"

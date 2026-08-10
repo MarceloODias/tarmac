@@ -156,31 +156,6 @@ class ConfirmPrompt(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class LogView(ModalScreen[None]):
-    CSS = """
-    LogView { align: center middle; }
-    #box { width: 90%; height: 80%; border: round $accent; padding: 1 2; }
-    #logs { height: 1fr; overflow-y: scroll; }
-    """
-
-    def __init__(self, title: str, body: str) -> None:
-        super().__init__()
-        self._title = title
-        self._body = body
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="box"):
-            yield Label(self._title)
-            # Text.from_ansi: log output is full of ANSI codes and literal
-            # [brackets] — never let it near the markup parser (it crashes)
-            yield Static(Text.from_ansi(self._body), id="logs")
-
-    def key_escape(self) -> None:
-        self.dismiss(None)
-
-    key_q = key_escape
-
-
 class FolderPick(ModalScreen[tuple[str, str] | None]):
     """Ask which folder a task should start in, most-used first."""
 
@@ -571,27 +546,21 @@ class TarmacApp(App):
         )
 
     def action_logs(self) -> None:
+        """`l`: open the logs in a real terminal window.
+
+        `claude logs` replays a full-screen TUI (cursor-positioning escapes,
+        74KB of them for a busy session) — rendering that inside a widget is
+        both unreadable and a crash; a terminal is exactly where it belongs."""
         cur = self._current()
         if cur is None:
             return
         target, row = cur
-        if not row.short_id:
-            self.notify("sessão sem short_id — logs indisponíveis", severity="warning")
+        try:
+            cmd = actions.logs_command(target, row)
+        except ValueError as e:
+            self.notify(str(e), severity="warning")
             return
-
-        def work():
-            # any exception in a textual worker crashes the app — never let one out
-            try:
-                proc = actions.remote_claude(target, "logs", row.short_id)
-                body = proc.stdout or proc.stderr or "(vazio)"
-            except Exception as e:
-                self.call_from_thread(self.notify, f"logs falharam: {e}",
-                                      severity="error")
-                return
-            body = body[-20_000:]  # last chunk is what matters
-            self.call_from_thread(
-                self.push_screen, LogView(f"logs · {row.display_name}", body))
-        self.run_worker(work, thread=True)
+        self._run_bg(lambda: actions.create_window(cmd)[1])
 
     def action_resolve(self) -> None:
         cur = self._current()

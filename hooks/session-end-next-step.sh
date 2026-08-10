@@ -1,46 +1,105 @@
 #!/bin/bash
-# SessionEnd hook (SPEC §10): asks the finished session what is still pending
-# and appends it to ~/.tarmac/next-steps.jsonl on THIS machine. The tarmac
-# collector drains that file on every cycle (locally or over ssh) and stores
-# it as the session's next_step (origin auto — never overwrites manual).
+# SessionEnd hook (SPEC §10): records "what is still pending" for the panel.
 #
-# Install (user-level, both machines):
-#   ~/.claude/settings.json -> hooks.SessionEnd -> command: this script
+# ⚠️ COST SAFETY — read before enabling. `claude -p --resume <id>` CONTINUES
+# that session, so when it finishes it fires SessionEnd again, with the same
+# id: the naive version of this hook feeds itself in a loop, and every lap
+# replays the whole transcript as input. That burned a real usage limit
+# (35 calls for 5 sessions in one day). Four independent guards now:
 #
-# TARMAC_NEXTSTEP_EXCLUDE (optional): colon-separated cwd prefixes to skip —
-# use it for service-session directories (chatops); one claude -p per Slack
-# message would be cost without value (SPEC §10).
+#   1. TARMAC_HOOK_GUARD  — exported before calling claude; a nested hook sees
+#                           it and exits. Kills the loop at the source.
+#   2. dedupe file        — one next_step per session id, ever.
+#   3. daily cap          — hard ceiling per machine (TARMAC_NEXTSTEP_MAX_DAY).
+#   4. allow/deny lists   — by cwd, so chatops dirs never spend a token.
+#
+# Install/uninstall with:  tarmac hook install   /   tarmac hook uninstall
+# Off by default. Cheap model by default (TARMAC_NEXTSTEP_MODEL).
 
 set -u
+
+# --- guard 1: never let a hook-spawned session trigger the hook again -------
+if [ -n "${TARMAC_HOOK_GUARD:-}" ]; then
+  exit 0
+fi
+
 INPUT=$(cat)
+STATE_DIR="${TARMAC_HOME:-$HOME/.tarmac}"
+QUEUE="$STATE_DIR/next-steps.jsonl"
+SEEN="$STATE_DIR/next-steps.seen"
+COUNTER="$STATE_DIR/next-steps.count"
+MAX_DAY="${TARMAC_NEXTSTEP_MAX_DAY:-20}"
+MODEL="${TARMAC_NEXTSTEP_MODEL:-claude-haiku-4-5-20251001}"
 
-SESSION_ID=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("session_id",""))
-except Exception: print("")' 2>/dev/null)
-CWD=$(printf '%s' "$INPUT" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("cwd",""))
-except Exception: print("")' 2>/dev/null)
+read_field() {
+  printf '%s' "$INPUT" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('$1', '') or '')
+except Exception:
+    print('')
+" 2>/dev/null
+}
 
+SESSION_ID=$(read_field session_id)
+CWD=$(read_field cwd)
 [ -n "$SESSION_ID" ] || exit 0
 
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+
+# --- guard 2: one summary per session, ever ---------------------------------
+if [ -f "$SEEN" ] && grep -qxF "$SESSION_ID" "$SEEN" 2>/dev/null; then
+  exit 0
+fi
+
+# --- guard 4: cwd allow/deny ------------------------------------------------
+if [ -n "${TARMAC_NEXTSTEP_ONLY:-}" ]; then
+  allowed=0
+  IFS=':' read -ra ONLY <<< "$TARMAC_NEXTSTEP_ONLY"
+  for prefix in "${ONLY[@]:-}"; do
+    [ -n "$prefix" ] && case "$CWD" in "$prefix"*) allowed=1;; esac
+  done
+  [ "$allowed" = "1" ] || exit 0
+fi
 IFS=':' read -ra EXCLUDES <<< "${TARMAC_NEXTSTEP_EXCLUDE:-}"
 for prefix in "${EXCLUDES[@]:-}"; do
   [ -n "$prefix" ] && case "$CWD" in "$prefix"*) exit 0;; esac
 done
 
-# The slow part runs detached: the hook must never hold up shutdown (SPEC §10).
+# --- guard 3: daily cap -----------------------------------------------------
+TODAY=$(date +%Y-%m-%d)
+COUNT=0
+if [ -f "$COUNTER" ]; then
+  saved_day=$(cut -d' ' -f1 "$COUNTER" 2>/dev/null)
+  [ "$saved_day" = "$TODAY" ] && COUNT=$(cut -d' ' -f2 "$COUNTER" 2>/dev/null)
+fi
+case "$COUNT" in ''|*[!0-9]*) COUNT=0;; esac
+if [ "$COUNT" -ge "$MAX_DAY" ]; then
+  exit 0
+fi
+
+# Claim the slot BEFORE spending anything: crash-safe against retries.
+printf '%s\n' "$SESSION_ID" >> "$SEEN"
+printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER"
+
+# The API call runs detached — the hook must never hold up shutdown (SPEC §10).
 (
-  NEXT=$(claude -p --resume "$SESSION_ID" --output-format json \
+  NEXT=$(TARMAC_HOOK_GUARD=1 claude -p --resume "$SESSION_ID" \
+    --model "$MODEL" --output-format json \
     "Em uma única frase curta, em português: o que ficou pendente nesta sessão?" \
-    2>/dev/null | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("result","").strip().replace("\n"," "))
-except Exception: print("")' 2>/dev/null)
+    2>/dev/null | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('result', '').strip().replace(chr(10), ' '))
+except Exception:
+    print('')
+" 2>/dev/null)
   if [ -n "$NEXT" ]; then
-    mkdir -p "$HOME/.tarmac"
-    printf '%s' "$NEXT" | python3 -c "import json,sys,time
+    printf '%s' "$NEXT" | python3 -c "
+import json, sys, time
 print(json.dumps({'session_id': '$SESSION_ID', 'next_step': sys.stdin.read(),
-                  'at': int(time.time()*1000)}, ensure_ascii=False))" \
-      >> "$HOME/.tarmac/next-steps.jsonl"
+                  'at': int(time.time() * 1000)}, ensure_ascii=False))
+" >> "$QUEUE"
   fi
 ) >/dev/null 2>&1 &
 disown 2>/dev/null || true
