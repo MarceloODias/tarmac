@@ -87,3 +87,33 @@ async def test_wide_terminal_gets_wide_names(app_env):
         await pilot.pause()
         # fullscreen default: name column flexes up to 80 cols
         assert app.size.width == 200
+
+
+def _footer_labels(app):
+    return {b.description
+            for bindings in app._bindings.key_to_bindings.values()
+            for b in bindings}
+
+
+async def test_footer_and_modals_follow_settings_locale(app_env):
+    """settings.locale must reach the footer and the notifications, not only
+    the section headers — the panel used to be half-Portuguese in 'en'."""
+    from dataclasses import replace as dc_replace
+
+    en = TarmacApp(dc_replace(app_env, settings=dc_replace(app_env.settings,
+                                                           locale="en")))
+    async with en.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        labels = _footer_labels(en)
+        assert "remove from list" in labels
+        assert "remover da lista" not in labels
+        # no untranslated placeholder leaked into the footer
+        assert not any(x.startswith("bind_") for x in labels)
+        assert en._t("confirm_stop", name="x") == "Stop x?"
+
+    pt = TarmacApp(dc_replace(app_env, settings=dc_replace(app_env.settings,
+                                                           locale="pt")))
+    async with pt.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert "remover da lista" in _footer_labels(pt)
+        assert pt._t("confirm_stop", name="x") == "Parar x?"

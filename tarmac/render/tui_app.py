@@ -9,6 +9,7 @@ u refresh · q quit.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -31,7 +32,7 @@ from ..derive import (
     build_view,
     format_duration,
 )
-from ..strings import tr
+from ..strings import set_locale, tr
 
 # badge renders as a full-width status bar; background = severity
 BADGE_STYLE = {
@@ -102,7 +103,7 @@ def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
         if row.kind == "background" and row.pid is None:
             # no live worker: attach may fail ("no saved transcript"). Say the
             # fact, not a guess — R removes it from the list.
-            parts.append("sem processo")
+            parts.append(tr(locale, "no_process"))
     if row.next_step:
         parts.append(f"→ {row.next_step}")
     if row.checklist:
@@ -144,14 +145,15 @@ class TextPrompt(ModalScreen[str | None]):
 class ConfirmPrompt(ModalScreen[bool]):
     CSS = TextPrompt.CSS.replace("TextPrompt", "ConfirmPrompt")
 
-    def __init__(self, question: str) -> None:
+    def __init__(self, question: str, hint: str) -> None:
         super().__init__()
         self._question = question
+        self._hint = hint
 
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
             yield Label(self._question)
-            yield Label("[b]enter[/b] confirma · [b]esc[/b] cancela")
+            yield Label(self._hint)
 
     def key_enter(self) -> None:
         self.dismiss(True)
@@ -206,21 +208,22 @@ class TarmacApp(App):
         background: #1a5fb4;
     }
     """
+    # descriptions are placeholders: __init__ rewrites them in settings.locale
     BINDINGS = [
-        Binding("enter", "open", "abrir", priority=False),
-        Binding("t", "new_task", "tarefa"),
-        Binding("c", "resume_tab", "resume em aba"),
-        Binding("C", "copy_resume", "copiar resume"),
-        Binding("p", "pin", "fixar"),
-        Binding("m", "remember", "lembrar"),
-        Binding("a", "defer", "adiar"),
-        Binding("n", "next_step", "próx. passo"),
-        Binding("l", "logs", "logs"),
-        Binding("x", "resolve", "resolver"),
-        Binding("S", "stop", "parar"),
-        Binding("R", "remove", "remover da lista"),
-        Binding("u", "refresh", "atualizar"),
-        Binding("q", "quit", "sair"),
+        Binding("enter", "open", "bind_open", priority=False),
+        Binding("t", "new_task", "bind_task"),
+        Binding("c", "resume_tab", "bind_resume_tab"),
+        Binding("C", "copy_resume", "bind_copy_resume"),
+        Binding("p", "pin", "bind_pin"),
+        Binding("m", "remember", "bind_remember"),
+        Binding("a", "defer", "bind_defer"),
+        Binding("n", "next_step", "bind_next_step"),
+        Binding("l", "logs", "bind_logs"),
+        Binding("x", "resolve", "bind_resolve"),
+        Binding("S", "stop", "bind_stop"),
+        Binding("R", "remove", "bind_remove"),
+        Binding("u", "refresh", "bind_refresh"),
+        Binding("q", "quit", "bind_quit"),
     ]
 
     def __init__(self, config: Config, interval_s: int = 60) -> None:
@@ -230,6 +233,28 @@ class TarmacApp(App):
         self.conn = connect()
         self.rows: dict[str, Row] = {}
         self.view: View | None = None
+        set_locale(config.settings.locale)  # actions.py raises/returns text too
+        self._localize_bindings()
+
+    def _t(self, key: str, **kwargs) -> str:
+        return tr(self.config.settings.locale, key, **kwargs)
+
+    def _localize_bindings(self) -> None:
+        """Footer labels in settings.locale.
+
+        BINDINGS is a class attribute, evaluated at import time — before any
+        config exists — so it carries string KEYS and the per-instance
+        BindingsMap copy gets the translated descriptions here.
+
+        New lists on purpose: BindingsMap.copy() is shallow, so the instance
+        shares the class-level lists and editing one in place would rewrite
+        the class BINDINGS for every later instance."""
+        self._bindings.key_to_bindings = {
+            key: [replace(b, description=self._t(b.description))
+                  if b.description.startswith("bind_") else b
+                  for b in bindings]
+            for key, bindings in self._bindings.key_to_bindings.items()
+        }
 
     def compose(self) -> ComposeResult:
         yield Static("", id="badge")
@@ -253,7 +278,8 @@ class TarmacApp(App):
         try:
             collect_if_stale(self.config, conn)
         except Exception as e:
-            self.call_from_thread(self.notify, f"coleta falhou: {e}", severity="error")
+            self.call_from_thread(self.notify, self._t("collect_failed", err=e),
+                                  severity="error")
         view = build_view(self.config, conn)
         self.call_from_thread(self._render, view)
 
@@ -320,7 +346,9 @@ class TarmacApp(App):
             options.append(None)
 
         add_section("idle", view.other)
-        add_section("done", view.done)
+        # DONE is not rendered: a finished session is not work, and the tail of
+        # them pushed the live sections off screen. build_view still fills
+        # view.done — the CLI resolves session ids through it.
 
         session_list = self.query_one("#sessions", OptionList)
         highlighted = session_list.highlighted
@@ -392,14 +420,13 @@ class TarmacApp(App):
             if guess:
                 from ..tasks import set_task_folder
                 set_task_folder(self.conn, task_id, guess.target_id, guess.cwd)
-                self.notify(f"tarefa criada → {guess.cwd}")
+                self.notify(self._t("task_created_folder", cwd=guess.cwd))
             else:
-                self.notify("tarefa criada (pasta será perguntada ao abrir)")
+                self.notify(self._t("task_created_ask"))
             self.refresh_data()
 
         self.push_screen(
-            TextPrompt("Nova tarefa",
-                       "no benji-dp, preciso dividir os rampids em ssps…"),
+            TextPrompt(self._t("new_task"), self._t("new_task_hint")),
             handle,
         )
 
@@ -411,7 +438,8 @@ class TarmacApp(App):
         def launch(target_id: str, cwd: str) -> None:
             target = self.config.target(target_id)
             if target is None:
-                self.notify(f"target desconhecido: {target_id}", severity="error")
+                self.notify(self._t("unknown_target", target=target_id),
+                            severity="error")
                 return
             set_task_folder(self.conn, task_id, target_id, cwd)
             mark_opened(self.conn, task_id)
@@ -428,8 +456,7 @@ class TarmacApp(App):
         candidates = [(c.target_id, labels.get(c.target_id, c.target_id), c.cwd)
                       for c in cwd_candidates(self.conn)]
         if not candidates:
-            self.notify("sem histórico de pastas ainda — rode sessões primeiro",
-                        severity="warning")
+            self.notify(self._t("no_folder_history"), severity="warning")
             return
 
         def picked(choice: tuple[str, str] | None) -> None:
@@ -437,7 +464,7 @@ class TarmacApp(App):
                 launch(*choice)
 
         self.push_screen(
-            FolderPick("Em qual pasta esta tarefa começa?", candidates), picked)
+            FolderPick(self._t("folder_pick_title"), candidates), picked)
 
     def action_resume_tab(self) -> None:
         """`c`: open a tab already inside this session's conversation.
@@ -453,7 +480,7 @@ class TarmacApp(App):
             self._open_task(row)
             return
         if actions.session_is_live(row):
-            self.notify("sessão viva — anexando (o CLI recusa resume em sessão ativa)")
+            self.notify(self._t("attaching_live"))
             self._run_bg(lambda: actions.open_or_focus(connect(), target, row))
             return
         try:
@@ -474,7 +501,7 @@ class TarmacApp(App):
             self.notify(str(e), severity="error")
             return
         actions.copy_to_clipboard(cmd)
-        self.notify(f"copiado: {cmd}")
+        self.notify(self._t("copied", cmd=cmd))
 
     def action_pin(self) -> None:
         cur = self._current()
@@ -525,7 +552,7 @@ class TarmacApp(App):
             self.refresh_data()
 
         self.push_screen(
-            TextPrompt(title, "5h · amanhã · segunda · 15/09 …"), handle,
+            TextPrompt(title, self._t("due_hint")), handle,
         )
 
     def action_remember(self) -> None:
@@ -584,12 +611,9 @@ class TarmacApp(App):
             # `x` clears a reminder I set; it cannot clear a session that is
             # genuinely blocked — only answering it can. Say so, never no-op.
             if row.eff_state == "blocked":
-                self.notify("sessão bloqueada de verdade: responda com Enter, "
-                            "ou adie com 'a'. 'x' só resolve lembrete vencido.",
-                            severity="warning")
+                self.notify(self._t("really_blocked"), severity="warning")
             else:
-                self.notify("nada a resolver aqui — 'x' vale para lembrete vencido",
-                            severity="warning")
+                self.notify(self._t("nothing_to_resolve"), severity="warning")
             return
         from .. import db as dbm
         dbm.upsert_meta(self.conn, row.target_id, row.session_id,
@@ -603,7 +627,7 @@ class TarmacApp(App):
             return
         target, row = cur
         if not row.short_id:
-            self.notify("sessão sem short_id — stop indisponível", severity="warning")
+            self.notify(self._t("no_short_id_stop"), severity="warning")
             return
 
         def handle(confirmed: bool) -> None:
@@ -614,12 +638,13 @@ class TarmacApp(App):
                 msg = (proc.stdout or proc.stderr).strip()
                 conn = connect()
                 collect(self.config, conn, force=True)
-                self.call_from_thread(self.notify, msg or "parado")
+                self.call_from_thread(self.notify, msg or self._t("stopped"))
                 self.call_from_thread(self.refresh_data)
             self.run_worker(work, thread=True, group='actions')
 
         self.push_screen(
-            ConfirmPrompt(f"Parar {row.display_name}?"), handle)
+            ConfirmPrompt(self._t("confirm_stop", name=row.display_name),
+                          self._t("confirm_hint")), handle)
 
     def action_remove(self) -> None:
         """`R`: drop a session from the agent view (`claude rm`).
@@ -633,11 +658,10 @@ class TarmacApp(App):
             return
         target, row = cur
         if row.kind == "task":
-            self.notify("tarefa: use 'x' para resolver", severity="warning")
+            self.notify(self._t("task_use_x"), severity="warning")
             return
         if not row.short_id:
-            self.notify("sessão interativa não pode ser removida da lista",
-                        severity="warning")
+            self.notify(self._t("interactive_no_remove"), severity="warning")
             return
 
         def handle(confirmed: bool) -> None:
@@ -648,14 +672,14 @@ class TarmacApp(App):
                 proc = actions.remote_claude(target, "rm", row.short_id)
                 msg = (proc.stdout or proc.stderr).strip()
                 collect(self.config, connect(), force=True)
-                self.call_from_thread(self.notify, msg or "removido")
+                self.call_from_thread(self.notify, msg or self._t("removed"))
                 self.call_from_thread(self.refresh_data)
             self.run_worker(work, thread=True, group='actions')
 
         self.push_screen(ConfirmPrompt(
-            f"Remover {row.display_name[:40]} da lista?\n"
-            "Pode apagar o worktree criado pela sessão, incluindo alterações "
-            f"não commitadas.\nPara reiniciá-la do zero: claude respawn {row.short_id}"
+            self._t("confirm_remove", name=row.display_name[:40],
+                    short_id=row.short_id),
+            self._t("confirm_hint"),
         ), handle)
 
     def action_refresh(self) -> None:

@@ -113,8 +113,7 @@ def render_view(config: Config, view: View) -> Group:
 
     if view.other:
         add("idle", view.other)
-    if view.done:
-        add("done", view.done)
+    # no DONE section here either (see tui_app._render)
 
     footer = Text()
     for tl in view.targets:

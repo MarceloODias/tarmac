@@ -16,7 +16,7 @@ from .collect import collect, collect_if_stale
 from .config import Config, load_config, tarmac_home
 from .dates import DateParseError, human_confirmation, parse_with_fallback
 from .derive import build_view
-from .strings import tr
+from .strings import set_locale, tr
 
 
 def _require_target(config: Config, target_id: str):
@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     config = load_config()
+    set_locale(config.settings.locale)
     conn = dbm.connect()
 
     if args.cmd == "collect":

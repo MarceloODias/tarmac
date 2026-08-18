@@ -73,7 +73,7 @@ def _session_line(row: Row, icon: str, extra: str, locale: str) -> list[str]:
     ]
     if row.overdue:
         sub.insert(0, (tr(locale, "resolve"), ("resolve", row.target_id, row.session_id)))
-    for shortcut in ("2h", "amanhã", "segunda"):
+    for shortcut in tr(locale, "due_shortcuts").split("|"):
         sub.append((f"{tr(locale, 'remind_in')} {shortcut}",
                     ("remember", row.target_id, row.session_id, shortcut)))
     for title, args in sub:
@@ -131,12 +131,7 @@ def render_swiftbar(config: Config, view: View) -> str:
             out.append(f"⚙ {s.label}  {s.target_label}  {s.active} {tr(locale, 'active')}{stuck} | disabled=true")
         out.append("---")
 
-    if view.done:
-        out.append(f"{tr(locale, 'done')} ({len(view.done)})")
-        for row in view.done:
-            out.append(f"-- ✓ {row.display_name}  {row.target_label}  {row.eff_state} | "
-                       + _tarmac_cmd("copy-resume", row.target_id, row.session_id))
-        out.append("---")
+    # no DONE section (see tui_app._render)
 
     for tl in view.targets:
         if tl.state == "offline":

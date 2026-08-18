@@ -104,7 +104,12 @@ async def test_every_key_on_every_row_never_crashes(panel):
         ol = app.query_one("#sessions", OptionList)
         selectable = [i for i in range(ol.option_count)
                       if (o := ol.get_option_at_index(i)) is not None and o.id]
-        assert len(selectable) >= 7, "faltou tipo de linha na amostra"
+        # 6 kinds: vencida, bloqueada, idle, permissão, serviço-remoto, tarefa.
+        # A sétima sessão da amostra está 'done' e NÃO deve aparecer.
+        assert len(selectable) >= 6, "faltou tipo de linha na amostra"
+        listed = {ol.get_option_at_index(i).id for i in selectable}
+        assert not any("don00001" in key for key in listed), \
+            "sessão concluída voltou para a listagem"
 
         for index in selectable:
             ol.highlighted = index

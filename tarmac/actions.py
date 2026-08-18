@@ -14,6 +14,7 @@ import subprocess
 from . import db as dbm
 from .config import Target
 from .derive import Row
+from .strings import t
 
 # FINDINGS F1: address iTerm2 by bundle id — the name "iTerm2" doesn't even
 # compile right after install; the bundle id is robust from second zero.
@@ -30,7 +31,7 @@ def attach_command(target: Target, row: Row) -> str:
         # fallback: works from any directory since v2.1.223
         inner = f"{target.claude_bin} --resume {shlex.quote(row.uuid)}"
     else:
-        raise ValueError("sessão sem short_id e sem uuid — nada para anexar")
+        raise ValueError(t("no_attach_id"))
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
     if target.transport == "ssh":
@@ -41,7 +42,7 @@ def attach_command(target: Target, row: Row) -> str:
 
 def resume_command(target: Target, row: Row) -> str:
     if not row.uuid:
-        raise ValueError("sessão sem uuid — não há comando de resume")
+        raise ValueError(t("no_resume_id"))
     bin_ = target.claude_bin if target.transport == "ssh" else "claude"
     inner = f"{bin_} --resume {row.uuid}"
     if target.needs_config_dir_export:
@@ -72,7 +73,7 @@ def logs_command(target: Target, row: Row) -> str:
     """`claude logs` replays a full-screen TUI (cursor codes, not text), so it
     only makes sense inside a real terminal — never in a widget."""
     if not row.short_id:
-        raise ValueError("sessão sem short_id — logs só existem para background")
+        raise ValueError(t("no_logs_id"))
     inner = f"{target.claude_bin} logs {shlex.quote(row.short_id)}"
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
@@ -196,7 +197,7 @@ def open_or_focus(
     if handle_row and handle_row["handle"]:
         result = focus_tab(handle_row["handle"])
         if result == "found":
-            return "focado"
+            return t("focused")
         # stale or errored handle: forget it and open fresh
         conn.execute(
             "DELETE FROM terminal_handles WHERE target_id = ? AND session_id = ?",
@@ -214,15 +215,11 @@ def open_or_focus(
             (target.id, row.session_id, handle, dbm.now_ms()),
         )
         conn.commit()
-        return "aberto"
+        return t("opened")
 
     # degrade: print + clipboard, never fail silently (SPEC §15.2)
     copied = copy_to_clipboard(command)
-    return (
-        f"iTerm2 indisponível ({msg}). Comando "
-        + ("copiado para o clipboard: " if copied else "para colar manualmente: ")
-        + command
-    )
+    return t("iterm_copied" if copied else "iterm_manual", msg=msg, cmd=command)
 
 
 def task_command(target: Target, cwd: str, text: str) -> str:
@@ -249,7 +246,7 @@ def open_task(
     ).fetchone()
     if handle_row and handle_row["handle"]:
         if focus_tab(handle_row["handle"]) == "found":
-            return "focado"
+            return t("focused")
         conn.execute(
             "DELETE FROM terminal_handles WHERE target_id = ? AND session_id = ?",
             (target.id, key),
@@ -265,13 +262,9 @@ def open_task(
             (target.id, key, handle, dbm.now_ms()),
         )
         conn.commit()
-        return "aberto"
+        return t("opened")
     copied = copy_to_clipboard(command)
-    return (
-        f"iTerm2 indisponível ({msg}). Comando "
-        + ("copiado para o clipboard: " if copied else "para colar manualmente: ")
-        + command
-    )
+    return t("iterm_copied" if copied else "iterm_manual", msg=msg, cmd=command)
 
 
 def close_resolved_tabs(
