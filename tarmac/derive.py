@@ -257,12 +257,48 @@ def build_view(
         else:
             view.scheduled.append(row)
 
-    view.overdue.sort(key=lambda r: r.due_at or 0)                    # oldest first
-    view.blocked.sort(key=lambda r: -(r.wait_s or 0))                 # longest wait first
-    view.working.sort(key=lambda r: (not r.pinned, r.display_name))
-    view.scheduled.sort(key=lambda r: (r.due_at is None, r.due_at or 0))
+    # every section groups by folder (see _by_folder); the key below is what
+    # ranks sessions inside a folder, and breaks ties between folders
+    view.overdue = _by_folder(view.overdue, lambda r: r.due_at or 0)
+    view.blocked = _by_folder(view.blocked, lambda r: -(r.wait_s or 0))
+    view.scheduled = _by_folder(view.scheduled,
+                                lambda r: (r.due_at is None, r.due_at or 0))
+    view.working = _by_folder(view.working, _pin_then_folder)
+    view.other = _by_folder(view.other, _pin_then_folder)
+    view.done = _by_folder(view.done, _pin_then_folder)
     view.services = sorted(service_agg.values(), key=lambda s: (s.target_label, s.label))
     return view
+
+
+def _pin_then_folder(row: Row) -> tuple[bool, str, str]:
+    """Rank for sections with nothing urgent to escalate (working, idle, done).
+
+    A pinned session leads, and the folder path comes before the name so that
+    folders of the same size land in path order — which keeps sibling projects
+    of one tree (…/inpowered/*) reading as a block instead of being split up by
+    session names.
+    """
+    return (not row.pinned, row.cwd or "", row.display_name)
+
+
+def _by_folder(rows: list[Row], key) -> list[Row]:
+    """Sessions of the same folder side by side (SPEC §8.0: the panel is read
+    top-down, and neighbouring subjects should read as one block).
+
+    Folder order: most sessions first (that is where the attention goes), then
+    the folder's most urgent session, then the path so it is stable. Inside a
+    folder the section's own key still applies.
+
+    Note this means a section's first row is NOT necessarily its most urgent
+    one — `badge` therefore takes the worst wait explicitly instead of reading
+    view.blocked[0].
+    """
+    per_folder: dict[str, list] = {}
+    for row in rows:
+        per_folder.setdefault(row.cwd or "", []).append(key(row))
+    rank = {folder: (-len(keys), min(keys), folder)
+            for folder, keys in per_folder.items()}
+    return sorted(rows, key=lambda r: (rank[r.cwd or ""], key(r)))
 
 
 def badge(view: View) -> tuple[str, str]:
@@ -273,7 +309,9 @@ def badge(view: View) -> tuple[str, str]:
     parts: list[str] = []
     severity = "ok"
     if view.blocked:
-        top = view.blocked[0]
+        # the worst wait, not the first row: the list is grouped by folder now,
+        # so position no longer implies urgency (see _by_folder)
+        top = max(view.blocked, key=lambda r: r.wait_s or 0)
         wait = format_duration(top.wait_s or 0)
         prefix = "≥" if top.wait_uncertain else ""
         parts.append(f"⏸ {len(view.blocked)} · {prefix}{wait}")

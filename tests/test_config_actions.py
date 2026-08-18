@@ -62,7 +62,33 @@ def test_attach_uses_short_id_then_uuid():
 def test_resume_command_uses_uuid():
     t = Target(id="mac", transport="local")
     assert resume_command(t, make_row()) == \
-        "claude --resume abc12345-1111-2222-3333-444455556666"
+        "cd /x; claude --resume abc12345-1111-2222-3333-444455556666"
+
+
+def test_commands_run_in_the_session_folder(tmp_path):
+    """Uma janela nova do iTerm nasce em $HOME, e o `--resume` funciona de
+    qualquer diretório: sem o cd a sessão voltava com a pasta errada e o Claude
+    Code perguntava se você confia na home a cada resume."""
+    from tarmac.actions import logs_command
+
+    local = Target(id="mac", transport="local")
+    row = make_row(cwd="/Users/m/projects/benji dp")  # espaço de propósito
+    for cmd in (resume_command(local, row), attach_command(local, row),
+                logs_command(local, row)):
+        assert cmd.startswith("cd '/Users/m/projects/benji dp'; "), cmd
+
+    # sem cwd conhecido não há cd para fazer
+    assert resume_command(local, make_row(cwd=None)).startswith("claude --resume")
+
+    # o prefixo de env tem de continuar colado no binário, depois do cd
+    remote = Target(id="ec2", transport="ssh", ssh_host="h",
+                    claude_bin="/bin/claude", config_dir="~/.claude-alt")
+    import shlex
+    cmd = attach_command(remote, make_row(cwd="/srv/app"))
+    assert cmd.startswith("ssh -t h ")
+    inner = shlex.split(cmd)[-1]  # what actually runs on the remote shell
+    assert inner.startswith("cd /srv/app; CLAUDE_CONFIG_DIR="), inner
+    assert inner.endswith("/bin/claude attach abc12345"), inner
 
 
 def test_resume_command_uses_claude_bin_over_ssh():

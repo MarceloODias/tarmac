@@ -139,3 +139,108 @@ async def test_resolve_on_blocked_row_explains_itself(blocked_app):
         await pilot.pause()
         assert notes, "tecla x não deu retorno nenhum ao usuário"
         assert "bloqueada" in notes[0].lower() or "vencid" in notes[0].lower()
+
+
+def test_idle_sessions_group_by_folder(tmp_path):
+    """4. Sessões do mesmo projeto ficavam espalhadas na lista: em IDLE a ordem
+    era a do banco (started_at), então dois assuntos vizinhos apareciam
+    separados por meia dúzia de linhas de outros projetos."""
+    conn = conn_for(tmp_path)
+    t = target()
+    raw = [
+        {"sessionId": "aaa00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/proj/benji-dp", "name": "ingestao", "startedAt": 1},
+        {"sessionId": "bbb00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/proj/rtb-index", "name": "stress", "startedAt": 2},
+        {"sessionId": "ccc00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/proj/benji-dp", "name": "backfill", "startedAt": 3},
+        {"sessionId": "ddd00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/proj/rtb-index", "name": "deploy", "startedAt": 4},
+    ]
+    apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    view = build_view(config_for(t), conn)
+
+    folders = [r.cwd for r in view.other]
+    assert folders == ["/proj/benji-dp", "/proj/benji-dp",
+                       "/proj/rtb-index", "/proj/rtb-index"], \
+        f"sessões do mesmo projeto ficaram separadas: {folders}"
+
+
+def test_same_size_folders_follow_the_path_not_the_session_name(tmp_path):
+    """6. Pastas de mesmo tamanho desempatavam pelo nome da sessão, o que
+    espalhava as irmãs de uma mesma árvore (/inpowered/*) pela lista."""
+    conn = conn_for(tmp_path)
+    t = target()
+    raw = [
+        {"sessionId": "zzz00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/inpowered/alpha", "name": "zulu", "startedAt": 1},
+        {"sessionId": "aaa00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/outro/beta", "name": "alfa", "startedAt": 2},
+        {"sessionId": "mmm00001-0000-0000-0000-000000000000", "kind": "interactive",
+         "status": "idle", "cwd": "/inpowered/omega", "name": "mike", "startedAt": 3},
+    ]
+    apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    view = build_view(config_for(t), conn)
+
+    folders = [r.cwd for r in view.other]
+    assert folders == ["/inpowered/alpha", "/inpowered/omega", "/outro/beta"], \
+        f"as pastas de /inpowered deviam ficar vizinhas: {folders}"
+
+
+def test_folder_with_more_sessions_comes_first(tmp_path):
+    """5. Ordem das pastas: a que concentra mais sessões vai para cima, mesmo
+    que a espera mais longa esteja numa pasta menor. O badge, que existe para
+    escalar, passa a ler a pior espera em vez da primeira linha."""
+    conn = conn_for(tmp_path)
+    t = target()
+    raw = [
+        {"id": "big00001", "kind": "background", "state": "blocked",
+         "cwd": "/proj/grande", "startedAt": 1, "name": "g1"},
+        {"id": "big00002", "kind": "background", "state": "blocked",
+         "cwd": "/proj/grande", "startedAt": 2, "name": "g2"},
+        {"id": "sml00001", "kind": "background", "state": "blocked",
+         "cwd": "/proj/pequeno", "startedAt": 3, "name": "p1"},
+    ]
+    apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    now = dbm.now_ms()
+    # a espera mais longa (2h) está na pasta com UMA sessão
+    for sid, minutes in (("big00001", 10), ("big00002", 5), ("sml00001", 120)):
+        conn.execute(
+            "UPDATE transitions SET at = ? WHERE target_id = ? AND session_id = ?",
+            (now - minutes * 60_000, "t1", sid))
+    conn.commit()
+
+    view = build_view(config_for(t), conn)
+    assert [r.display_name for r in view.blocked] == ["g1", "g2", "p1"], \
+        "a pasta com mais sessões devia vir primeiro"
+    text, severity = badge(view)
+    assert "2h" in text, f"badge devia mostrar a pior espera (2h), mostrou: {text}"
+    assert severity == "alarm", f"a escalação se perdeu com a nova ordem: {severity}"
+
+
+def test_blocked_keeps_longest_wait_on_top_while_grouping(tmp_path):
+    """Empate de contagem: aí quem manda é a espera. A pasta da sessão mais
+    antiga vem primeiro e a irmã de pasta a acompanha, em vez de cair no fim."""
+    conn = conn_for(tmp_path)
+    t = target()
+    raw = [
+        {"id": "old00001", "kind": "background", "state": "blocked",
+         "cwd": "/proj/a", "startedAt": 1, "name": "antiga"},
+        {"id": "mid00001", "kind": "background", "state": "blocked",
+         "cwd": "/proj/b", "startedAt": 2, "name": "media"},
+        {"id": "new00001", "kind": "background", "state": "blocked",
+         "cwd": "/proj/a", "startedAt": 3, "name": "recente"},
+    ]
+    apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    now = dbm.now_ms()
+    for sid, minutes in (("old00001", 90), ("mid00001", 45), ("new00001", 5)):
+        conn.execute(
+            "UPDATE transitions SET at = ? WHERE target_id = ? AND session_id = ?",
+            (now - minutes * 60_000, "t1", sid))
+    conn.commit()
+
+    view = build_view(config_for(t), conn)
+    names = [r.display_name for r in view.blocked]
+    assert names[0] == "antiga", f"a maior espera saiu do topo: {names}"
+    assert names == ["antiga", "recente", "media"], \
+        f"a pasta /proj/a devia vir junta, depois /proj/b: {names}"

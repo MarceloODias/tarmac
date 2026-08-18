@@ -23,6 +23,22 @@ ITERM_ID = "com.googlecode.iterm2"
 
 # ---------- command building (SPEC §9.1) ----------
 
+def _in_cwd(inner: str, row: Row) -> str:
+    """Run the command in the session's own folder.
+
+    A fresh iTerm window starts in $HOME, and `--resume` works from anywhere
+    (v2.1.223+), so resuming used to land in $HOME: the session came back with
+    the wrong working directory and Claude Code asked "do you trust the files
+    in this folder?" for the home tree on every single resume.
+
+    `;` and not `&&`: if the folder is gone (a worktree that was removed) the
+    cd error is visible in the window but the resume still happens — the
+    transcript is readable from any directory.
+    """
+    if not row.cwd:
+        return inner
+    return f"cd {shlex.quote(row.cwd)}; {inner}"
+
 def attach_command(target: Target, row: Row) -> str:
     """The shell command that lands inside the session."""
     if row.short_id:
@@ -34,6 +50,7 @@ def attach_command(target: Target, row: Row) -> str:
         raise ValueError(t("no_attach_id"))
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = _in_cwd(inner, row)  # the env prefix must stay glued to the binary
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"  # -t is mandatory
@@ -44,9 +61,10 @@ def resume_command(target: Target, row: Row) -> str:
     if not row.uuid:
         raise ValueError(t("no_resume_id"))
     bin_ = target.claude_bin if target.transport == "ssh" else "claude"
-    inner = f"{bin_} --resume {row.uuid}"
+    inner = f"{bin_} --resume {shlex.quote(row.uuid)}"
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = _in_cwd(inner, row)
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"
@@ -77,6 +95,7 @@ def logs_command(target: Target, row: Row) -> str:
     inner = f"{target.claude_bin} logs {shlex.quote(row.short_id)}"
     if target.needs_config_dir_export:
         inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = _in_cwd(inner, row)
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"
