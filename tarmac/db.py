@@ -144,6 +144,24 @@ def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
     )
 
 
+def clear_auto_next_step(conn: sqlite3.Connection, target_id: str,
+                         session_id: str) -> bool:
+    """Drop an auto pending note; returns whether there was one.
+
+    The note describes the moment the session ENDED. Once it is working again
+    that moment has passed, and a stale note is worse than none: a two-week-old
+    "corrigir o bug da MV" reads exactly like something still to do. Text I
+    typed myself (origin 'manual') is mine and survives.
+    """
+    cur = conn.execute(
+        "UPDATE session_meta SET next_step = NULL, next_step_origin = NULL, "
+        "updated_at = ? WHERE target_id = ? AND session_id = ? "
+        "AND next_step IS NOT NULL AND next_step_origin = 'auto'",
+        (now_ms(), target_id, session_id),
+    )
+    return cur.rowcount > 0
+
+
 def get_meta(conn: sqlite3.Connection, target_id: str, session_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM session_meta WHERE target_id = ? AND session_id = ?",

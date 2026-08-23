@@ -1,5 +1,6 @@
 """Headless tests for the interactive TUI (textual run_test harness)."""
 
+import asyncio
 import json
 
 import pytest
@@ -117,3 +118,54 @@ async def test_footer_and_modals_follow_settings_locale(app_env):
         await pilot.pause()
         assert "remover da lista" in _footer_labels(pt)
         assert pt._t("confirm_stop", name="x") == "Parar x?"
+
+
+# --- a window that stays open for days must notice targets.yaml changing ----
+
+async def test_a_new_target_appears_without_restarting_the_window(app_env, tmp_path, monkeypatch):
+    """The real symptom: a target added today stayed invisible for days, and
+    the panel looked broken instead of merely out of date."""
+    targets = tmp_path / "targets.yaml"
+    targets.write_text(
+        "settings:\n  locale: en\ntargets:\n"
+        "  - id: t1\n    label: T1\n    transport: local\n"
+    )
+    monkeypatch.setenv("TARMAC_TARGETS", str(targets))
+
+    app = TarmacApp(app_env)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert [t.id for t in app.config.targets] == ["t1"]
+
+        targets.write_text(
+            "settings:\n  locale: en\ntargets:\n"
+            "  - id: t1\n    label: T1\n    transport: local\n"
+            "  - id: t2\n    label: T2\n    transport: local\n"
+            "    config_dir: ~/.claude-personal\n"
+        )
+        import os
+        os.utime(targets, (0, 0))  # any change of mtime, no clock waiting
+
+        # through the refresh cycle, not by calling the helper directly: the
+        # wiring into _collect_and_render is the part that was missing
+        app.refresh_data()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert [t.id for t in app.config.targets] == ["t1", "t2"]
+
+
+async def test_a_broken_targets_file_keeps_the_panel_running(app_env, tmp_path, monkeypatch):
+    targets = tmp_path / "targets.yaml"
+    targets.write_text("targets:\n  - id: t1\n    transport: local\n")
+    monkeypatch.setenv("TARMAC_TARGETS", str(targets))
+
+    app = TarmacApp(app_env)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        before = app.config
+        targets.write_text("targets:\n  - label: sem id\n")  # invalid
+        import os
+        os.utime(targets, (0, 0))
+        # it runs in the collect worker thread, like in production
+        await asyncio.to_thread(app._reload_config_if_changed)
+        assert app.config is before  # old config kept, no crash

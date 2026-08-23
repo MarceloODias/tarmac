@@ -11,7 +11,7 @@ import json
 import shutil
 from pathlib import Path
 
-from .config import tarmac_home
+from .config import DEFAULT_CONFIG_DIR, Config, tarmac_home
 
 HOOK_NAME = "session-end-next-step.sh"
 SENTINEL = HOOK_NAME  # how we recognise our own hook entry
@@ -45,8 +45,26 @@ def build_command(exclude: str = "", only: str = "", max_day: int = 20,
     return f'{prefix} "$HOME/.tarmac/{HOOK_NAME}"'.strip()
 
 
-def _settings_path() -> Path:
-    return Path("~/.claude/settings.json").expanduser()
+def _settings_path(config_dir: str = DEFAULT_CONFIG_DIR) -> Path:
+    """settings.json of ONE session universe.
+
+    The hook has to be installed per CLAUDE_CONFIG_DIR: a second account on the
+    same machine reads its own settings.json, so installing only in ~/.claude
+    leaves that account with no hook and no sign of one.
+    """
+    return Path(config_dir or DEFAULT_CONFIG_DIR).expanduser() / "settings.json"
+
+
+def local_config_dirs(config: Config) -> list[str]:
+    """Every session universe on THIS machine, in config order."""
+    dirs: list[str] = []
+    for t in config.enabled_targets():
+        if t.transport != "local":
+            continue
+        cfg = t.config_dir or DEFAULT_CONFIG_DIR
+        if cfg not in dirs:
+            dirs.append(cfg)
+    return dirs or [DEFAULT_CONFIG_DIR]
 
 
 def _load(path: Path) -> dict:
@@ -68,8 +86,8 @@ def _save(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def status() -> tuple[bool, str]:
-    data = _load(_settings_path())
+def status(config_dir: str = DEFAULT_CONFIG_DIR) -> tuple[bool, str]:
+    data = _load(_settings_path(config_dir))
     for entry in data.get("hooks", {}).get("SessionEnd", []):
         for h in entry.get("hooks", []):
             if SENTINEL in str(h.get("command", "")):
@@ -78,9 +96,9 @@ def status() -> tuple[bool, str]:
 
 
 def install(exclude: str = "", only: str = "", max_day: int = 20,
-            model: str = "") -> str:
+            model: str = "", config_dir: str = DEFAULT_CONFIG_DIR) -> str:
     install_script()
-    path = _settings_path()
+    path = _settings_path(config_dir)
     data = _load(path)
     hooks = data.setdefault("hooks", {})
     session_end = [
@@ -96,8 +114,8 @@ def install(exclude: str = "", only: str = "", max_day: int = 20,
     return command
 
 
-def uninstall() -> bool:
-    path = _settings_path()
+def uninstall(config_dir: str = DEFAULT_CONFIG_DIR) -> bool:
+    path = _settings_path(config_dir)
     data = _load(path)
     hooks = data.get("hooks", {})
     before = hooks.get("SessionEnd", [])

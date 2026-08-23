@@ -48,8 +48,7 @@ def attach_command(target: Target, row: Row) -> str:
         inner = f"{target.claude_bin} --resume {shlex.quote(row.uuid)}"
     else:
         raise ValueError(t("no_attach_id"))
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     inner = _in_cwd(inner, row)  # the env prefix must stay glued to the binary
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
@@ -62,8 +61,7 @@ def resume_command(target: Target, row: Row) -> str:
         raise ValueError(t("no_resume_id"))
     bin_ = target.claude_bin if target.transport == "ssh" else "claude"
     inner = f"{bin_} --resume {shlex.quote(row.uuid)}"
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     inner = _in_cwd(inner, row)
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
@@ -93,8 +91,7 @@ def logs_command(target: Target, row: Row) -> str:
     if not row.short_id:
         raise ValueError(t("no_logs_id"))
     inner = f"{target.claude_bin} logs {shlex.quote(row.short_id)}"
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     inner = _in_cwd(inner, row)
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
@@ -105,8 +102,7 @@ def logs_command(target: Target, row: Row) -> str:
 def remote_claude(target: Target, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a claude subcommand on the target (logs/stop/rm — SPEC §9.2)."""
     inner = f"{target.claude_bin} {' '.join(shlex.quote(a) for a in args)}"
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         cmd = ["ssh", "-o", "BatchMode=yes", host, inner]
@@ -245,8 +241,7 @@ def task_command(target: Target, cwd: str, text: str) -> str:
     """Start a fresh Claude Code in the task's folder, with the task text as
     the opening prompt."""
     inner = f"cd {shlex.quote(cwd)} && {target.claude_bin} {shlex.quote(text)}"
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     if target.transport == "ssh":
         host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
         return f"ssh -t {shlex.quote(host)} {shlex.quote(inner)}"

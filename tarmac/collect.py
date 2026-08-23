@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -22,7 +21,7 @@ from pathlib import Path
 
 from . import db as dbm
 from .config import Config, Target, tarmac_home
-from .model import Session, parse_agents_json
+from .model import WORKING, Session, parse_agents_json
 
 NEXT_STEPS_REMOTE = "~/.tarmac/next-steps.jsonl"
 
@@ -90,8 +89,7 @@ def build_command(target: Target) -> list[str]:
     binary = (resolve_local_bin(target.claude_bin)
               if target.transport == "local" else target.claude_bin)
     inner = f"{binary} agents --json --all"
-    if target.needs_config_dir_export:
-        inner = f"CLAUDE_CONFIG_DIR={shlex.quote(target.config_dir)} {inner}"
+    inner = f"{target.config_dir_prefix}{inner}"
     if target.transport == "local":
         return ["sh", "-c", inner]
     host = f"{target.ssh_user}@{target.ssh_host}" if target.ssh_user else target.ssh_host
@@ -231,6 +229,10 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             # first sighting: record the entry state so blocked_since exists
             _record_transition(conn, t.id, s.session_id, None, eff, now)
         elif old["eff_state"] != eff:
+            if eff == WORKING:
+                # working again -> whatever the hook summarised at the last end
+                # is history (SPEC §10)
+                dbm.clear_auto_next_step(conn, t.id, s.session_id)
             # If it changed while we were blind, we do NOT know when: stamp the
             # start of the blind window and mark uncertain (SPEC §4.4 — show >=,
             # never a falsely precise number).
@@ -311,6 +313,53 @@ def fetch_next_steps(target: Target) -> list[dict]:
     return out
 
 
+def machine_key(target: Target) -> tuple:
+    """Targets that share a machine share `~/.tarmac` — and thus one queue."""
+    if target.transport == "local":
+        return ("local",)
+    return ("ssh", target.ssh_user, target.ssh_host)
+
+
+def entry_target(conn: sqlite3.Connection, targets: list[Target], entry: dict) -> Target:
+    """Which target on this machine does one queue entry belong to?
+
+    The hook records the CLAUDE_CONFIG_DIR it ran under, which is the only
+    reliable discriminator: a session that ended before the first collect has
+    no row to look up, and guessing would file it under the wrong account.
+    Entries written by an older hook have no config_dir — those fall back to
+    the target that actually has the session, then to the first target.
+    """
+    if len(targets) == 1:
+        return targets[0]
+    cfg = str(entry.get("config_dir") or "")
+    if cfg:
+        for t in targets:
+            if t.matches_config_dir(cfg):
+                return t
+    uuid = str(entry.get("session_id") or "")
+    if uuid:
+        for t in targets:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE target_id = ? AND (uuid = ? OR session_id = ?)",
+                (t.id, uuid, uuid),
+            ).fetchone()
+            if row:
+                return t
+    return targets[0]
+
+
+def route_next_steps(
+    conn: sqlite3.Connection, targets: list[Target], entries: list[dict]
+) -> None:
+    """Split one machine's drained queue across that machine's targets."""
+    per_target: dict[str, list[dict]] = {}
+    by_id = {t.id: t for t in targets}
+    for entry in entries:
+        per_target.setdefault(entry_target(conn, targets, entry).id, []).append(entry)
+    for target_id, group in per_target.items():
+        apply_next_steps(conn, by_id[target_id], group)
+
+
 def apply_next_steps(conn: sqlite3.Connection, target: Target, entries: list[dict]) -> None:
     for entry in entries:
         uuid = str(entry["session_id"])
@@ -351,8 +400,18 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     with conn:
         for r in results:
             apply_result(conn, r)
+        # The next_step queue is per MACHINE, not per target: two config dirs on
+        # one box write to the same ~/.tarmac/next-steps.jsonl. Draining it once
+        # per target would let the first one swallow the other's entries — so
+        # drain once per machine and route each entry (SPEC §10).
+        per_machine: dict[tuple, list[Target]] = {}
+        for r in results:
             if r.sessions is not None:  # only drain machines we can reach
-                apply_next_steps(conn, r.target, fetch_next_steps(r.target))
+                per_machine.setdefault(machine_key(r.target), []).append(r.target)
+        for group in per_machine.values():
+            entries = fetch_next_steps(group[0])
+            if entries:
+                route_next_steps(conn, group, entries)
         dbm.prune_service_sessions(conn)
         dbm.kv_set(conn, "last_collect_at", str(now))
     return results

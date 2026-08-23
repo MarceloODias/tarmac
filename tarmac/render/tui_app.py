@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 
 from rich.text import Text
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -21,7 +22,7 @@ from textual.widgets.option_list import Option
 
 from .. import actions
 from ..collect import collect, collect_if_stale
-from ..config import Config, Target
+from ..config import Config, Target, load_config, targets_path
 from ..db import connect
 from ..derive import (
     ESCALATION_ALARM_S,
@@ -33,6 +34,7 @@ from ..derive import (
     format_duration,
 )
 from ..strings import set_locale, tr
+from .rows import layout_for, row_renderable
 
 # badge renders as a full-width status bar; background = severity
 BADGE_STYLE = {
@@ -51,70 +53,6 @@ SECTION_STYLE = {
     "done": "bold #b0b0b0",
 }
 CWD_STYLE = "#8c8c8c"
-
-
-def _row_text(row: Row, locale: str, name_width: int = 34) -> Text:
-    """One session line. name_width flexes with the terminal: the default
-    assumption is a fullscreen window on a dedicated monitor (SPEC §8.0), so
-    wide terminals get wide, untruncated names."""
-    icon = {"blocked": "⏸", "working": "▶", "idle": "·", "task": "☐"}.get(
-        row.eff_state, "⏱" if row.overdue or row.due_at else "·")
-    icon_style = {"blocked": "bold #ff7b63", "working": "bold #8ff0a4",
-                  "idle": CWD_STYLE, "task": "bold #dc8add"}.get(
-        row.eff_state, "bold #f8e45c")
-    if row.wait_s is not None and row.wait_s >= ESCALATION_ALARM_S:
-        icon_style = "bold #ff5050"
-    text = Text()
-    text.append(f"{icon} ", style=icon_style)
-    text.append(f"{row.display_name[:name_width]:<{name_width}}", style="bold white")
-    if row.never_named:
-        text.append("✎", style="#f8e45c")
-    else:
-        text.append(" ")
-    if row.pinned:
-        text.append("★", style="#f8e45c")
-    else:
-        text.append(" ")
-    text.append(f" {row.target_label[:8]:<8}", style="bold #62a0ea")
-
-    wait = ""
-    if row.wait_s is not None:
-        prefix = "≥" if row.wait_uncertain else ""
-        marker = "▲" if row.wait_s >= ESCALATION_ALARM_S else ""
-        wait = f"{prefix}{format_duration(row.wait_s)}{marker}"
-    style = ""
-    if row.wait_s is not None:
-        style = "bold #57e389"
-        if row.wait_s >= ESCALATION_ALARM_S:
-            style = "bold white on #c01c28"
-        elif row.wait_s >= ESCALATION_WARN_S:
-            style = "bold black on #e5a50a"
-    text.append(f" {wait:>7}", style=style)
-
-    parts = []
-    if row.overdue and row.due_at:
-        parts.append(tr(locale, "overdue_ago",
-                        ago=format_duration(max(0, int(time.time() - row.due_at / 1000)))))
-    elif row.due_at:
-        parts.append(row.due_label or "")
-    if row.eff_state == "blocked":
-        parts.append("⚠ permission prompt" if row.permission_prompt
-                      else (row.waiting_for or "blocked"))
-        if row.kind == "background" and row.pid is None:
-            # no live worker: attach may fail ("no saved transcript"). Say the
-            # fact, not a guess — R removes it from the list.
-            parts.append(tr(locale, "no_process"))
-    if row.next_step:
-        parts.append(f"→ {row.next_step}")
-    if row.checklist:
-        parts.append(f"[{row.checklist[0]}/{row.checklist[1]}]")
-    if row.stale:
-        parts.append("(stale)")
-    if parts:
-        text.append("  " + "  ".join(p for p in parts if p), style="#deddda")
-    if row.cwd:
-        text.append(f"\n    {row.cwd}", style=CWD_STYLE)
-    return text
 
 
 class TextPrompt(ModalScreen[str | None]):
@@ -233,6 +171,7 @@ class TarmacApp(App):
         self.conn = connect()
         self.rows: dict[str, Row] = {}
         self.view: View | None = None
+        self._config_mtime = self._targets_mtime()
         set_locale(config.settings.locale)  # actions.py raises/returns text too
         self._localize_bindings()
 
@@ -273,8 +212,38 @@ class TarmacApp(App):
         self.run_worker(self._collect_and_render, thread=True, exclusive=True,
                         group='collect')
 
+    def _targets_mtime(self) -> float | None:
+        try:
+            return targets_path().stat().st_mtime
+        except OSError:
+            return None
+
+    def _reload_config_if_changed(self) -> None:
+        """Pick up edits to targets.yaml without restarting the window.
+
+        This panel stays open for days. The config was read once at startup, so
+        a target added meanwhile was invisible until the window was restarted —
+        and the panel looked broken (nothing new ever appeared) rather than
+        merely out of date.
+        """
+        mtime = self._targets_mtime()
+        if mtime is None or mtime == self._config_mtime:
+            return
+        self._config_mtime = mtime
+        try:
+            config = load_config()
+        except Exception as e:  # a half-saved file must not take the panel down
+            self.call_from_thread(self.notify,
+                                  self._t("config_reload_failed", err=e),
+                                  severity="error")
+            return
+        self.config = config
+        set_locale(config.settings.locale)
+        self.call_from_thread(self.notify, self._t("config_reloaded"))
+
     def _collect_and_render(self) -> None:
         conn = connect()  # thread-local connection
+        self._reload_config_if_changed()
         try:
             collect_if_stale(self.config, conn)
         except Exception as e:
@@ -290,8 +259,16 @@ class TarmacApp(App):
     def _render(self, view: View) -> None:
         self.view = view
         locale = self.config.settings.locale
-        # name column flexes: fullscreen on a big monitor shows full names
-        name_width = max(34, min(80, (self.size.width or 100) - 60))
+        # every row that will be rendered, idle included: sizing the name column
+        # from the top sections alone truncated every name in IDLE
+        listed = (view.overdue + view.blocked + view.working + view.scheduled
+                  + view.other)
+        # the width the ROWS get, not the window's: the OptionList has its own
+        # padding, and with every column a fixed width those two columns came
+        # out of the target label ("M…") instead of out of a flexible spacer
+        sessions = self.query_one("#sessions", OptionList)
+        inner = sessions.content_size.width or max(20, (self.size.width or 100) - 2)
+        layout = layout_for(listed, inner)
         text, severity = badge(view)
         badge_widget = self.query_one("#badge", Static)
         extra = ""
@@ -322,7 +299,8 @@ class TarmacApp(App):
             for row in rows:
                 key = f"{row.target_id}|{row.session_id}"
                 self.rows[key] = row
-                options.append(Option(_row_text(row, locale, name_width), id=key))
+                options.append(Option(
+                    row_renderable(row, locale, layout), id=key))
             options.append(None)  # separator
 
         add_section("for_today", view.overdue)

@@ -47,24 +47,62 @@ CWD=$(read_field cwd)
 
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
-# --- guard 2: one summary per session, ever ---------------------------------
-if [ -f "$SEEN" ] && grep -qxF "$SESSION_ID" "$SEEN" 2>/dev/null; then
-  exit 0
-fi
+# Which session universe is this? The queue lives in ~/.tarmac, which every
+# CLAUDE_CONFIG_DIR on the machine shares, so the collector needs to know who
+# wrote each line to hand it to the right target (SPEC §10).
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
-# --- guard 4: cwd allow/deny ------------------------------------------------
+expand_home() {  # a deny prefix written as ~/foo was silently inert before
+  case "$1" in "~/"*) printf '%s' "$HOME/${1#\~/}" ;; "~") printf '%s' "$HOME" ;;
+                   *) printf '%s' "$1" ;; esac
+}
+CFG_DIR=$(expand_home "$CFG_DIR")
+
+# --- guard 4: cwd allow/deny (checked before taking the lock) ----------------
 if [ -n "${TARMAC_NEXTSTEP_ONLY:-}" ]; then
   allowed=0
   IFS=':' read -ra ONLY <<< "$TARMAC_NEXTSTEP_ONLY"
   for prefix in "${ONLY[@]:-}"; do
-    [ -n "$prefix" ] && case "$CWD" in "$prefix"*) allowed=1;; esac
+    [ -n "$prefix" ] || continue
+    prefix=$(expand_home "$prefix")
+    case "$CWD" in "$prefix"*) allowed=1;; esac
   done
   [ "$allowed" = "1" ] || exit 0
 fi
-IFS=':' read -ra EXCLUDES <<< "${TARMAC_NEXTSTEP_EXCLUDE:-}"
-for prefix in "${EXCLUDES[@]:-}"; do
-  [ -n "$prefix" ] && case "$CWD" in "$prefix"*) exit 0;; esac
+if [ -n "${TARMAC_NEXTSTEP_EXCLUDE:-}" ]; then
+  # unknown cwd + a deny-list means we cannot prove this is allowed: DENY.
+  # (payloads without `cwd` used to slip past every exclusion silently)
+  [ -n "$CWD" ] || exit 0
+  IFS=':' read -ra EXCLUDES <<< "$TARMAC_NEXTSTEP_EXCLUDE"
+  for prefix in "${EXCLUDES[@]:-}"; do
+    [ -n "$prefix" ] || continue
+    prefix=$(expand_home "$prefix")
+    case "$CWD" in "$prefix"*) exit 0;; esac
+  done
+fi
+
+# --- lock: guards 2 and 3 are read-modify-write, so they need mutual ---------
+# exclusion. `mkdir` is the portable atomic primitive (no flock on macOS).
+# Concurrent session ends used to blow past the daily cap and re-summarise the
+# same session several times.
+LOCK="$STATE_DIR/next-steps.lock"
+acquired=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if mkdir "$LOCK" 2>/dev/null; then acquired=1; break; fi
+  # steal a lock left behind by a killed hook (older than a minute)
+  if [ -d "$LOCK" ] && [ -z "$(find "$LOCK" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+  fi
+  sleep 0.2
 done
+# could not lock: skip this one rather than risk a double spend
+[ "$acquired" = "1" ] || exit 0
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+# --- guard 2: one summary per session, ever ---------------------------------
+if [ -f "$SEEN" ] && grep -qxF "$SESSION_ID" "$SEEN" 2>/dev/null; then
+  exit 0
+fi
 
 # --- guard 3: daily cap -----------------------------------------------------
 TODAY=$(date +%Y-%m-%d)
@@ -80,7 +118,28 @@ fi
 
 # Claim the slot BEFORE spending anything: crash-safe against retries.
 printf '%s\n' "$SESSION_ID" >> "$SEEN"
-printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER"
+printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER.tmp" && mv -f "$COUNTER.tmp" "$COUNTER"
+# keep .seen bounded: it was append-only and grew forever
+if [ "$(wc -l < "$SEEN" 2>/dev/null || echo 0)" -gt 2000 ]; then
+  tail -n 1000 "$SEEN" > "$SEEN.tmp" && mv -f "$SEEN.tmp" "$SEEN"
+fi
+rmdir "$LOCK" 2>/dev/null; trap - EXIT
+
+# A refused call still answers with JSON, and its `result` is the REFUSAL text.
+# Ten sessions ended up with "You've hit your individual spend limit · run
+# /usage-credits…" as their pending note, sitting in the panel for two weeks.
+# is_error is the only reliable discriminator: without it the panel presents an
+# API error as if it were something I have to do.
+release_slot() {  # let a future SessionEnd try again for this session
+  [ -f "$SEEN" ] || return 0
+  mkdir "$LOCK" 2>/dev/null || return 0
+  grep -vxF "$SESSION_ID" "$SEEN" > "$SEEN.tmp" 2>/dev/null
+  # grep exits 1 when nothing is left to print, which is a normal outcome here
+  # (that id was the only line), so its status is deliberately ignored — but
+  # only a file that actually got written may replace the list
+  [ -f "$SEEN.tmp" ] && mv -f "$SEEN.tmp" "$SEEN"
+  rmdir "$LOCK" 2>/dev/null
+}
 
 # The API call runs detached — the hook must never hold up shutdown (SPEC §10).
 (
@@ -90,14 +149,26 @@ printf '%s %s\n' "$TODAY" "$((COUNT + 1))" > "$COUNTER"
     2>/dev/null | python3 -c "
 import json, sys
 try:
-    print(json.load(sys.stdin).get('result', '').strip().replace(chr(10), ' '))
+    payload = json.load(sys.stdin)
 except Exception:
     print('')
+    raise SystemExit(0)
+if payload.get('is_error') or payload.get('subtype') not in (None, 'success'):
+    print('')          # an error is not a pending note
+    raise SystemExit(0)
+print((payload.get('result') or '').strip().replace(chr(10), ' '))
 " 2>/dev/null)
+  if [ -z "$NEXT" ]; then
+    release_slot
+  fi
   if [ -n "$NEXT" ]; then
-    printf '%s' "$NEXT" | python3 -c "
-import json, sys, time
-print(json.dumps({'session_id': '$SESSION_ID', 'next_step': sys.stdin.read(),
+    # values travel in the environment, never interpolated into the program:
+    # a quote in an id or a path would otherwise write a broken line
+    printf '%s' "$NEXT" | TARMAC_Q_SESSION="$SESSION_ID" TARMAC_Q_CFG="$CFG_DIR" python3 -c "
+import json, os, sys, time
+print(json.dumps({'session_id': os.environ['TARMAC_Q_SESSION'],
+                  'next_step': sys.stdin.read(),
+                  'config_dir': os.environ['TARMAC_Q_CFG'],
                   'at': int(time.time() * 1000)}, ensure_ascii=False))
 " >> "$QUEUE"
   fi

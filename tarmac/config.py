@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,6 +66,8 @@ class SessionClassRule:
 class Target:
     id: str
     label: str = ""
+    account: str = ""   # Claude account/config dir shown as its own column;
+                        # blank = the default one (SPEC §3)
     owner: str = ""
     mine: bool = True
     enabled: bool = True
@@ -87,6 +90,54 @@ class Target:
     @property
     def needs_config_dir_export(self) -> bool:
         return self.config_dir not in ("", DEFAULT_CONFIG_DIR)
+
+    @property
+    def config_dir_prefix(self) -> str:
+        """`CLAUDE_CONFIG_DIR=<dir> ` to glue in front of the binary, or ''.
+
+        A leading `~` must survive the quoting. `shlex.quote("~/.claude-alt")`
+        yields `'~/.claude-alt'` and the CLI takes it literally: it reads a
+        directory named `~`, finds nothing, and exits 0 with an empty list — an
+        invisible target with no error to notice. Locally we expand the tilde
+        ourselves; over ssh only the remote knows its $HOME, so we leave the
+        expansion to the remote shell and quote only the rest of the path.
+        """
+        if not self.needs_config_dir_export:
+            return ""
+        cfg = self.config_dir
+        if self.transport == "local":
+            quoted = shlex.quote(str(Path(cfg).expanduser()))
+        elif cfg == "~":
+            quoted = '"$HOME"'
+        elif cfg.startswith("~/"):
+            quoted = '"$HOME"/' + shlex.quote(cfg[2:])
+        else:
+            quoted = shlex.quote(cfg)
+        return f"CLAUDE_CONFIG_DIR={quoted} "
+
+
+    def matches_config_dir(self, absolute: str) -> bool:
+        """Is `absolute` — a path recorded on the machine itself, already
+        expanded — this target's config dir?
+
+        Used to route the machine-wide next_step queue: two config dirs on one
+        box share `~/.tarmac/next-steps.jsonl`, so each entry has to be handed
+        to the target it came from. Over ssh we don't know the remote $HOME, so
+        a `~/x` target matches any absolute path ending in `/x` — enough to
+        tell two config dirs on the same host apart, which is all we need.
+        """
+        if not absolute:
+            return False
+        candidate = os.path.normpath(absolute)
+        mine = self.config_dir or DEFAULT_CONFIG_DIR
+        if not mine.startswith("~"):
+            return candidate == os.path.normpath(mine)
+        if self.transport == "local":
+            return candidate == os.path.normpath(str(Path(mine).expanduser()))
+        rest = mine[1:].strip("/")
+        if not rest:  # bare '~': nothing to match on remotely
+            return False
+        return candidate.endswith("/" + rest)
 
 
 @dataclass
@@ -138,6 +189,7 @@ def _parse_target(raw: dict) -> Target:
     return Target(
         id=str(tid),
         label=str(raw.get("label", tid)),
+        account=str(raw.get("account", "")),
         owner=str(raw.get("owner", "")),
         mine=bool(raw.get("mine", True)),
         enabled=bool(raw.get("enabled", True)),

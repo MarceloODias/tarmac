@@ -16,7 +16,7 @@ from .collect import collect, collect_if_stale
 from .config import Config, load_config, tarmac_home
 from .dates import DateParseError, human_confirmation, parse_with_fallback
 from .derive import build_view
-from .strings import set_locale, tr
+from .strings import set_locale, t
 
 
 def _require_target(config: Config, target_id: str):
@@ -58,6 +58,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("render", help="renderiza o painel")
     p.add_argument("--format", choices=["swiftbar", "tui"], required=True)
+    p.add_argument("--width", type=int, default=None,
+                   help="renderiza como se a janela tivesse N colunas "
+                        "(reproduz o painel real sem abri-lo)")
     p.add_argument("--all-targets", action="store_true",
                    help="inclui targets com mine: false")
     p.add_argument("--once", action="store_true",
@@ -101,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--only", default="", help="rodar SÓ nestes prefixos de cwd (a:b)")
     p.add_argument("--max-day", type=int, default=20, help="teto de chamadas por dia")
     p.add_argument("--model", default="", help="modelo (default: haiku, barato)")
+    p.add_argument("--config-dir", default="",
+                   help="um CLAUDE_CONFIG_DIR só (default: todos os targets locais)")
 
     p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
     p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
@@ -133,7 +138,8 @@ def main(argv: list[str] | None = None) -> None:
                 from rich.console import Console
 
                 from .render.tui import render_view
-                Console().print(render_view(config, view))
+                console = Console(width=args.width) if args.width else Console()
+                console.print(render_view(config, view, console.width))
             else:
                 from .render.tui_app import run_tui
                 run_tui(config)
@@ -157,11 +163,17 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "hook":
         from . import hookmgr
+        # one settings.json per CLAUDE_CONFIG_DIR: a second account on this
+        # machine never sees a hook installed in the other one
+        config_dirs = ([args.config_dir] if args.config_dir
+                       else hookmgr.local_config_dirs(config))
         if args.action == "status":
-            installed, command = hookmgr.status()
-            print(f"instalado: {installed}")
-            if installed:
-                print(f"comando: {command}")
+            for cfg in config_dirs:
+                installed, command = hookmgr.status(cfg)
+                print(f"{cfg}: instalado: {installed}")
+                if installed:
+                    print(f"  comando: {command}")
+            # dedupe/counter are machine-wide, shared by every config dir
             seen = tarmac_home() / "next-steps.seen"
             count = tarmac_home() / "next-steps.count"
             if seen.exists():
@@ -170,12 +182,16 @@ def main(argv: list[str] | None = None) -> None:
                 print(f"contador do dia: {count.read_text().strip()}")
             return
         if args.action == "install":
-            command = hookmgr.install(args.exclude, args.only, args.max_day, args.model)
-            print(f"instalado: {command}")
+            for cfg in config_dirs:
+                command = hookmgr.install(args.exclude, args.only, args.max_day,
+                                          args.model, config_dir=cfg)
+                print(f"{cfg}: instalado: {command}")
             print("cada sessão encerrada gasta 1 chamada (transcript inteiro como "
                   "input). Teto diário e dedupe por sessão estão ativos.")
             return
-        print("removido" if hookmgr.uninstall() else "não estava instalado")
+        for cfg in config_dirs:
+            print(f"{cfg}: " + ("removido" if hookmgr.uninstall(cfg)
+                                else "não estava instalado"))
         return
 
     if args.cmd == "task":
@@ -247,7 +263,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "copy-resume":
         cmd = actions.resume_command(target, row)
         if actions.copy_to_clipboard(cmd):
-            print(f"copiado: {cmd}")
+            print(t("copied", cmd=cmd))
         else:
             print(cmd)
     elif args.cmd in ("remember", "defer"):

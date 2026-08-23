@@ -10,6 +10,7 @@
 """
 
 import json
+from dataclasses import replace
 
 import pytest
 from textual.widgets import OptionList
@@ -244,3 +245,343 @@ def test_blocked_keeps_longest_wait_on_top_while_grouping(tmp_path):
     assert names[0] == "antiga", f"a maior espera saiu do topo: {names}"
     assert names == ["antiga", "recente", "media"], \
         f"a pasta /proj/a devia vir junta, depois /proj/b: {names}"
+
+
+# --- the account column (a second Claude account on the same machine) --------
+# The label used to carry the account ("Mac (personal)") and the 8-char target
+# column cut it to "Mac (per".
+
+def two_account_rows(tmp_path):
+    conn = conn_for(tmp_path)
+    work = target(id="mac", label="Mac", config_dir="~/.claude")
+    personal = target(id="mac-personal", label="Mac", account="Personal",
+                      config_dir="~/.claude-personal")
+    for t, sid, name in ((work, "aaaaaaaa", "trabalho"),
+                         (personal, "bbbbbbbb", "pessoal")):
+        raw = [{"id": sid, "kind": "background", "state": "working",
+                "cwd": "/x", "startedAt": 1, "name": name}]
+        apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    conn.commit()
+    dbm.kv_set(conn, "last_collect_at", str(dbm.now_ms()))
+    conn.commit()
+    return config_for(work, personal), conn
+
+
+def test_account_column_width_is_zero_with_a_single_account():
+    from tarmac.derive import Row, account_width
+    from tests.test_config_actions import make_row  # same Row factory
+    assert account_width([]) == 0
+    assert account_width([make_row()]) == 0
+    assert account_width([make_row(target_account="Personal")]) == 8
+    assert account_width([make_row(target_account="x" * 40)]) == 10  # capped
+
+
+def col_of(line: str, text: str) -> int:
+    """Display column of `text` in `line`.
+
+    NOT the character index: ✎ and · are multi-byte and (for ✎) can measure
+    wider than one cell, so indexes lie about alignment.
+    """
+    from rich.cells import cell_len
+    idx = line.index(text)
+    return cell_len(line[:idx])
+
+
+def render_lines(renderable, width: int = 120) -> list[str]:
+    import re
+
+    from rich.console import Console
+    console = Console(width=width, no_color=True)
+    with console.capture() as cap:
+        console.print(renderable)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", cap.get())   # styles, not content
+    return [ln.rstrip() for ln in plain.splitlines()]
+
+
+def test_account_shows_next_to_the_target_without_truncating_it(tmp_path):
+    """Target, account and wait share one right-aligned cell: rows that use
+    none of the extras must not leave an empty band before the pending."""
+    from tarmac.derive import account_width, build_view
+    from tarmac.render.rows import layout_for, row_renderable
+    config, conn = two_account_rows(tmp_path)
+    view = build_view(config, conn)
+    rows = {r.display_name: r for r in view.working}
+    width = account_width(view.working)
+
+    layout = layout_for(view.working, 120)
+    assert layout.account == width
+    personal = render_lines(row_renderable(rows["pessoal"], "en", layout), 120)[0]
+    work = render_lines(row_renderable(rows["trabalho"], "en", layout), 120)[0]
+    assert "Personal" in personal
+    assert "Mac (per" not in personal          # the truncation is gone
+    assert "Personal" not in work              # default account: nothing shown
+    # right-aligned as one block: both rows end at the same column
+    assert len(personal) == len(work)
+
+
+# --- a long pending text must stay in its own column ------------------------
+# It used to be appended to one Text, so the terminal wrapped it back to
+# column 0 and the sentence ran under the session names.
+
+LONG = ("Pendente: corrigir o bug da MV (composite-path) em "
+        "`S3ToClickhousePartitionSwapProcessor` e implementar/testar a "
+        "sincronização de nomes DV360 em benji-channels (Phase 2).")
+
+
+def test_long_pending_wraps_inside_its_own_column(tmp_path):
+    from tarmac.derive import build_view
+    from tarmac.render.rows import layout_for, row_renderable
+    config, conn = two_account_rows(tmp_path)
+    dbm.upsert_meta(conn, "mac", "aaaaaaaa", next_step=LONG)
+    conn.commit()
+    row = next(r for r in build_view(config, conn).working
+               if r.display_name == "trabalho")
+
+    lines = render_lines(row_renderable(row, "en", layout_for([row], 110)),
+                         width=110)
+    first = lines[0]
+    column = first.index("→")
+    assert column > 30, "pending must start after the other columns"
+    wrapped = [ln for ln in lines[1:] if ln.strip() and not ln.strip().startswith("/")]
+    assert wrapped, "the sentence is long enough to wrap at this width"
+    for ln in wrapped:
+        assert len(ln) - len(ln.lstrip()) == column, f"wrapped to column 0: {ln!r}"
+
+
+def test_name_column_follows_the_content_not_the_window(tmp_path):
+    from tarmac.derive import build_view
+    from tarmac.render.rows import name_column_width
+    config, conn = two_account_rows(tmp_path)
+    rows = build_view(config, conn).working
+    assert name_column_width(rows) == 18                      # floor
+    assert name_column_width(rows, floor=4) == len("trabalho")
+    long_row = replace(rows[0], display_name="x" * 200)
+    assert name_column_width([long_row]) == 44                # cap
+
+
+def test_once_renderer_shows_the_account(tmp_path):
+    from rich.console import Console
+
+    from tarmac.derive import build_view
+    from tarmac.render.tui import render_view
+    config, conn = two_account_rows(tmp_path)
+    console = Console(width=120, no_color=True)
+    with console.capture() as cap:
+        console.print(render_view(config, build_view(config, conn)))
+    out = cap.get()
+    assert "Personal" in out
+    assert "Mac (per" not in out
+
+
+def test_swiftbar_line_names_the_account(tmp_path):
+    from tarmac.derive import build_view
+    from tarmac.render.swiftbar import render_swiftbar
+    config, conn = two_account_rows(tmp_path)
+    out = render_swiftbar(config, build_view(config, conn))
+    assert "pessoal" in out and "Mac Personal" in out
+    # the work session keeps a bare target label
+    assert [ln for ln in out.splitlines() if "trabalho" in ln and "Personal" not in ln]
+
+
+def test_account_is_read_from_the_yaml(tmp_path):
+    from tarmac.config import load_config
+    path = tmp_path / "targets.yaml"
+    path.write_text(
+        "targets:\n"
+        "  - id: mac\n    transport: local\n"
+        "  - id: mac-personal\n    label: Mac\n    account: Personal\n"
+        "    transport: local\n    config_dir: ~/.claude-personal\n"
+    )
+    config = load_config(path)
+    assert config.target("mac").account == ""
+    assert config.target("mac-personal").account == "Personal"
+
+
+def test_pending_column_never_takes_more_than_its_share():
+    from tarmac.render.rows import PENDING_MAX_SHARE, pending_column_width
+    assert pending_column_width(200) == 80
+    assert pending_column_width(200) / 200 <= PENDING_MAX_SHARE
+    assert pending_column_width(40) == 24          # floor on a narrow window
+    assert pending_column_width(0) == 40           # unknown size: assume 100
+
+
+# The window is 148 columns, not the 200 I first checked at: a layout verified
+# at one width says nothing about another, so every width is checked.
+PANEL_WIDTHS = [100, 120, 148, 200]
+
+
+@pytest.mark.parametrize("width", PANEL_WIDTHS)
+def test_pending_keeps_its_share_and_hugs_the_right_edge(tmp_path, width):
+    from tarmac.derive import build_view
+    from tarmac.render.rows import (
+        PENDING_MAX_SHARE,
+        layout_for,
+        pending_column_width,
+        row_renderable,
+    )
+    config, conn = two_account_rows(tmp_path)
+    dbm.upsert_meta(conn, "mac", "aaaaaaaa", next_step=LONG)
+    conn.commit()
+    row = next(r for r in build_view(config, conn).working
+               if r.display_name == "trabalho")
+
+    cap = pending_column_width(width)
+    lines = render_lines(row_renderable(row, "en", layout_for([row], width)),
+                         width=width)
+    body = [ln for ln in lines if not ln.strip().startswith("/")]
+    start = body[0].index("→")
+
+    # its share of the screen, measured — not assumed from one window size
+    share = (width - start) / width
+    assert share <= PENDING_MAX_SHARE + 1 / width, f"{share:.0%} of {width} cols"
+    # anchored right: the column ends at the edge, so the empty gap sits before
+    # the sentence and not after it
+    assert start == width - cap, f"start={start}, expected {width - cap}"
+    for ln in body:
+        assert len(ln) <= width, f"row overflowed the window: {ln!r}"
+    # continuation lines carry only pending text: they must start in its column
+    for ln in body[1:]:
+        if ln.strip():
+            assert len(ln) - len(ln.lstrip()) == start, \
+                f"pending wrapped left of its column: {ln!r}"
+
+
+@pytest.fixture
+def mixed_app(tmp_path, monkeypatch):
+    """A short name working, a long one idle — the long one must stay whole."""
+    monkeypatch.setenv("TARMAC_HOME", str(tmp_path))
+    conn = dbm.connect(tmp_path / "tarmac.db")
+    t = target(id="mac", label="Mac")
+    raw = [
+        {"id": "short001", "kind": "background", "state": "working",
+         "cwd": "/x", "startedAt": 1, "name": "curta"},
+        {"sessionId": "long0001-0000-0000-0000-000000000000",
+         "kind": "interactive", "status": "idle", "cwd": "/y", "startedAt": 2,
+         "name": "wsi-nexxen-clickhouse-ingest"},
+    ]
+    apply_result(conn, TargetResult(t, parse_agents_json(json.dumps(raw))))
+    dbm.upsert_meta(conn, "mac", "long0001-0000-0000-0000-000000000000",
+                    next_step=LONG)
+    dbm.kv_set(conn, "last_collect_at", str(dbm.now_ms()))
+    conn.commit()
+    return config_for(t)
+
+
+def app_lines(app, width: int = 200) -> list[str]:
+    from textual.widgets import OptionList as OL
+    ol = app.query_one("#sessions", OL)
+    out: list[str] = []
+    for i in range(ol.option_count):
+        option = ol.get_option_at_index(i)
+        if option is not None:
+            out += render_lines(option.prompt, width)
+    return out
+
+
+@pytest.mark.parametrize("width", PANEL_WIDTHS)
+async def test_app_anchors_the_pending_column(mixed_app, width):
+    """Through the real app, at every window width — the panel window is 148,
+    and a cap honoured at 200 told me nothing about it."""
+    from tarmac.render.rows import pending_column_width
+    app = TarmacApp(mixed_app)
+    async with app.run_test(size=(width, 40)) as pilot:
+        await pilot.pause()
+        # the rows are laid out in the OptionList's content width, which is the
+        # window minus its padding — not the window
+        inner = app.query_one("#sessions", OptionList).content_size.width
+        width, cap = inner, pending_column_width(inner)
+        lines = app_lines(app, inner)
+        pending = [ln for ln in lines if "→" in ln]
+        assert pending, "the long next_step did not render"
+        assert pending[0].index("→") == width - cap
+        for ln in lines:
+            assert len(ln) <= width, f"row overflowed the window: {ln!r}"
+
+
+async def test_idle_names_are_sized_in_too(mixed_app):
+    """Sizing the name column from the top sections only truncated every idle
+    name — and IDLE is where most sessions live."""
+    app = TarmacApp(mixed_app)
+    async with app.run_test(size=(200, 40)) as pilot:
+        await pilot.pause()
+        rendered = "\n".join(app_lines(app))
+        assert "wsi-nexxen-clickhouse-ingest" in rendered
+        assert "…" not in rendered
+
+
+@pytest.mark.parametrize("width", PANEL_WIDTHS)
+def test_meta_block_sits_five_columns_right_of_centre(tmp_path, width):
+    """Centred read a touch too far left; Marcelo asked for +5 columns.
+
+    Also pins the arithmetic: every column plus its paddings must add up to the
+    width exactly, or the pending stops sitting flush against the right edge.
+    """
+    from tarmac.derive import build_view
+    from tarmac.render.rows import META_SHIFT, layout_for, row_renderable
+    config, conn = two_account_rows(tmp_path)
+    dbm.upsert_meta(conn, "mac", "aaaaaaaa", next_step=LONG)
+    conn.commit()
+    row = next(r for r in build_view(config, conn).working
+               if r.display_name == "trabalho")
+
+    layout = layout_for([row], width)
+    cols = layout.fixed_columns()
+    assert (sum(cols) + layout.left_gap + layout.right_gap
+            + len(cols) + 1) == width
+    # 5 is the number Marcelo asked for, written literally: asserting against
+    # META_SHIFT made this test self-referential and it passed with the nudge
+    # set to 0
+    assert META_SHIFT == 5
+    assert layout.left_gap - layout.right_gap in (9, 10)  # 2x5, 1 less if odd
+
+    first = render_lines(row_renderable(row, "en", layout), width=width)[0]
+    assert col_of(first, "Mac") + layout.target < col_of(first, "→")
+
+
+@pytest.mark.parametrize("width", PANEL_WIDTHS)
+def test_target_and_account_read_as_columns(tmp_path, width):
+    """Right-aligned as one block, `Mac` landed ~10 columns further left on the
+    rows that also had an account: the labels no longer read as a column."""
+    from tarmac.derive import build_view
+    from tarmac.render.rows import layout_for, row_renderable
+    config, conn = two_account_rows(tmp_path)
+    view = build_view(config, conn)
+    layout = layout_for(view.working, width)
+    lines = {r.display_name: render_lines(row_renderable(r, "en", layout), width)[0]
+             for r in view.working}
+
+    # same column in every row, with and without an account
+    assert col_of(lines["pessoal"], "Mac") == col_of(lines["trabalho"], "Mac")
+    assert "Personal" in lines["pessoal"]
+    assert "Personal" not in lines["trabalho"]
+    assert col_of(lines["pessoal"], "Mac") > col_of(lines["pessoal"], "Personal")
+
+
+@pytest.mark.parametrize("width", PANEL_WIDTHS)
+async def test_every_label_forms_one_column_in_the_real_app(mixed_app, width):
+    """The rule Marcelo set: the target sits in the same column whether or not
+    the row also shows an account. Measured in display cells, through the app."""
+    from tarmac import db as dbm2
+    from tarmac.collect import TargetResult, apply_result
+    from tarmac.model import parse_agents_json
+    conn = dbm2.connect()  # TARMAC_HOME is the fixture's tmp_path
+    extra = [{"sessionId": "acc00001-0000-0000-0000-000000000000",
+              "kind": "interactive", "status": "idle", "cwd": "/z",
+              "startedAt": 3, "name": "com-conta"}]
+    personal = target(id="mac-personal", label="Mac", account="Personal",
+                      config_dir="~/.claude-personal")
+    apply_result(conn, TargetResult(personal, parse_agents_json(json.dumps(extra))))
+    conn.commit()
+    config = config_for(*mixed_app.targets, personal)
+
+    app = TarmacApp(config)
+    async with app.run_test(size=(width, 40)) as pilot:
+        await pilot.pause()
+        columns = {}
+        for ln in app_lines(app, width - 2):   # OptionList padding: 0 1
+            for label in ("Mac", "Personal"):
+                if label in ln and "→" not in ln.split(label)[0]:
+                    columns.setdefault(label, set()).add(col_of(ln, label))
+        assert columns.get("Personal"), "the account row did not render"
+        assert len(columns["Mac"]) == 1, f"target in several columns: {columns}"
+        assert len(columns["Personal"]) == 1, f"account in several columns: {columns}"

@@ -33,6 +33,25 @@ def test_local_collect_command_with_config_dir():
     assert "CLAUDE_CONFIG_DIR" in build_command(t)[-1]
 
 
+def test_local_config_dir_tilde_is_expanded():
+    """A quoted `~` makes the CLI read a dir named `~`: empty list, exit 0."""
+    t = Target(id="mac", transport="local", config_dir="~/.claude-alt")
+    inner = build_command(t)[-1]
+    assert "~" not in inner
+    assert f"CLAUDE_CONFIG_DIR={Path('~/.claude-alt').expanduser()} " in inner
+
+
+def test_ssh_config_dir_tilde_expands_on_the_remote():
+    t = Target(id="ec2", transport="ssh", ssh_host="h", claude_bin="/bin/claude",
+               config_dir="~/.claude-alt")
+    assert build_command(t)[-1].startswith('CLAUDE_CONFIG_DIR="$HOME"/.claude-alt ')
+
+
+def test_absolute_config_dir_is_passed_through():
+    t = Target(id="mac", transport="local", config_dir="/opt/claude cfg")
+    assert "CLAUDE_CONFIG_DIR='/opt/claude cfg' " in build_command(t)[-1]
+
+
 def test_ssh_collect_command():
     t = Target(id="ec2", transport="ssh", ssh_host="ec2-runner",
                claude_bin="/home/u/.local/bin/claude")
@@ -47,6 +66,19 @@ def test_ssh_user_prefix():
     t = Target(id="ec2", transport="ssh", ssh_host="host", ssh_user="frank",
                claude_bin="/bin/claude")
     assert "frank@host" in build_command(t)
+
+
+def test_attach_and_resume_expand_the_config_dir_tilde():
+    """Opening a second-account session must land in that account's dir."""
+    local = Target(id="mac-personal", transport="local", config_dir="~/.claude-personal")
+    expanded = str(Path("~/.claude-personal").expanduser())
+    for cmd in (attach_command(local, make_row()), resume_command(local, make_row())):
+        assert f"CLAUDE_CONFIG_DIR={expanded} " in cmd
+        assert "~" not in cmd
+
+    remote = Target(id="ec2-alt", transport="ssh", ssh_host="h",
+                    claude_bin="/bin/claude", config_dir="~/.claude-alt")
+    assert 'CLAUDE_CONFIG_DIR="$HOME"/.claude-alt ' in attach_command(remote, make_row())
 
 
 def test_attach_uses_short_id_then_uuid():

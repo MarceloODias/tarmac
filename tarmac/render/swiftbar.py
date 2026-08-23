@@ -59,7 +59,9 @@ def _session_line(row: Row, icon: str, extra: str, locale: str) -> list[str]:
     pencil = " ✎" if row.never_named else ""
     perm = " ⚠" if row.permission_prompt else ""
     stale = " (stale)" if row.stale else ""
-    label = f"{icon} {row.display_name}{pencil}  {row.target_label}  {extra}{perm}{checklist}{stale}"
+    account = f" {row.target_account}" if row.target_account else ""
+    label = (f"{icon} {row.display_name}{pencil}  {row.target_label}{account}  "
+             f"{extra}{perm}{checklist}{stale}")
     color = _line_color(row)
     attrs = f" color={color}" if color else ""
     lines = [f"{label} | {_tarmac_cmd('open', row.target_id, row.session_id)}{attrs}"]

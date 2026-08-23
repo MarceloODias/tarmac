@@ -43,6 +43,7 @@ class Row:
     never_named: bool = False
     checklist: tuple[int, int] | None = None  # (done, total)
     permission_prompt: bool = False
+    target_account: str = ""     # blank for the default account
 
 
 @dataclass
@@ -88,6 +89,16 @@ def _wait_of(conn: sqlite3.Connection, r: sqlite3.Row, now: int) -> tuple[int | 
         return max(0, (now - (r["last_seen_at"] or now)) // 1000), False
     at, uncertain = bs
     return max(0, (now - at) // 1000), uncertain
+
+
+def account_width(rows: list[Row], cap: int = 10) -> int:
+    """Width of the account column, 0 when every session is on the default one.
+
+    A single-account setup pays nothing for it; with two accounts the column is
+    as wide as the longest name, and the default account renders as blanks —
+    the label column stays short instead of being truncated to "Mac (per".
+    """
+    return min(cap, max((len(r.target_account) for r in rows), default=0))
 
 
 def build_view(
@@ -177,6 +188,7 @@ def build_view(
         row = Row(
             target_id=r["target_id"],
             target_label=t.label,
+            target_account=t.account,
             session_id=r["session_id"],
             display_name=(meta["alias"] if meta and meta["alias"] else None)
             or r["name"] or r["session_id"][:8],
@@ -234,10 +246,12 @@ def build_view(
     # PRA HOJE when overdue, open by starting Claude Code in their folder
     from .tasks import open_tasks
     labels = {t.id: t.label for t in config.enabled_targets()}
+    accounts = {t.id: t.account for t in config.enabled_targets()}
     for tk in open_tasks(conn):
         row = Row(
             target_id=tk["target_id"] or "",
             target_label=labels.get(tk["target_id"], "?") if tk["target_id"] else "?",
+            target_account=accounts.get(tk["target_id"], "") if tk["target_id"] else "",
             session_id=f"task:{tk['id']}",
             display_name=tk["text"],
             eff_state="task",
