@@ -20,7 +20,7 @@ from tarmac.render.tui_app import TarmacApp
 from tarmac.tasks import add_task
 
 # every binding the panel exposes, minus quit
-KEYS = ["enter", "c", "C", "p", "m", "a", "n", "l", "x", "S", "u", "t"]
+KEYS = ["enter", "c", "C", "p", "m", "a", "n", "N", "l", "x", "S", "u", "t"]
 
 
 @pytest.fixture

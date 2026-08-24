@@ -160,6 +160,7 @@ class TarmacApp(App):
         Binding("x", "resolve", "bind_resolve"),
         Binding("S", "stop", "bind_stop"),
         Binding("R", "remove", "bind_remove"),
+        Binding("N", "notify_toggle", "bind_notify"),
         Binding("u", "refresh", "bind_refresh"),
         Binding("q", "quit", "bind_quit"),
     ]
@@ -659,6 +660,19 @@ class TarmacApp(App):
                     short_id=row.short_id),
             self._t("confirm_hint"),
         ), handle)
+
+    def action_notify_toggle(self) -> None:
+        """One keystroke to silence the alerts before a meeting (SPEC §7.3).
+
+        Synchronous and on this connection: it is a single kv write, and the
+        badge has to show 🔕 in the same frame or the panel looks like it
+        ignored the key. A timed mute is `tarmac notify mute 1h`.
+        """
+        from .. import notify as notifier
+        muted = notifier.toggle(self.conn)
+        self.notify(self._t("notify_state_off" if muted else "notify_state_on"))
+        view = build_view(self.config, self.conn)
+        self._render(view)
 
     def action_refresh(self) -> None:
         def work():

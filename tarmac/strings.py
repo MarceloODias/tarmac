@@ -84,6 +84,20 @@ STRINGS = {
                           "uncommitted changes.\nTo restart it from scratch: "
                           "claude respawn {short_id}",
         "removed": "removed",
+        # notifications (SPEC §7.3)
+        "notify_title": "Needs you",
+        "notify_title_many": "{n} sessions need you",
+        "notify_body_default": "waiting for you",
+        "notify_state_on": "Notifications: on",
+        "notify_state_off": "Notifications: off",
+        "notify_state_until": "Notifications: muted until {when}",
+        "notify_muted_badge": "🔕",
+        "notify_mute": "Mute notifications",
+        "notify_unmute": "Unmute notifications",
+        "notify_mute_for": "Mute for {when}",
+        "notify_mute_eod": "Mute until end of day",
+        "notify_unsupported": "notifications need macOS — nothing will be sent here",
+        "bind_notify": "mute alerts",
         # actions
         "no_attach_id": "session without short_id and without uuid — nothing to attach",
         "no_resume_id": "session without uuid — no resume command",
@@ -171,6 +185,20 @@ STRINGS = {
                           "alterações não commitadas.\nPara reiniciá-la do zero: "
                           "claude respawn {short_id}",
         "removed": "removido",
+        # notifications (SPEC §7.3)
+        "notify_title": "Precisa de você",
+        "notify_title_many": "{n} sessões precisam de você",
+        "notify_body_default": "esperando por você",
+        "notify_state_on": "Notificações: ligadas",
+        "notify_state_off": "Notificações: desligadas",
+        "notify_state_until": "Notificações: silenciadas até {when}",
+        "notify_muted_badge": "🔕",
+        "notify_mute": "Silenciar notificações",
+        "notify_unmute": "Religar notificações",
+        "notify_mute_for": "Silenciar por {when}",
+        "notify_mute_eod": "Silenciar até o fim do dia",
+        "notify_unsupported": "notificações exigem macOS — nada será enviado aqui",
+        "bind_notify": "silenciar",
         # actions
         "no_attach_id": "sessão sem short_id e sem uuid — nada para anexar",
         "no_resume_id": "sessão sem uuid — não há comando de resume",

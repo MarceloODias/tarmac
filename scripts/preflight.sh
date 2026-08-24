@@ -37,6 +37,19 @@ else
   check "$BIN" stats
   check "$BIN" task
   check "$BIN" hook status
+  check "$BIN" notify status
+fi
+
+step "notificação (SPEC §7.3) — o alerta chega mesmo?"
+if [ -x "$BIN" ]; then
+  before=$("$BIN" notify status)
+  if "$BIN" notify test 2>&1 | grep -q enviada; then
+    printf '  ✓ osascript aceitou o alerta de teste\n'
+  else
+    printf '  ! osascript recusou — System Settings > Notifications > Script Editor\n'
+  fi
+  # o teste não pode deixar o painel mudo por acidente
+  case "$before" in *": on"|*": ligadas") "$BIN" notify on >/dev/null ;; esac
 fi
 
 step "hook de custo desligado por padrão"

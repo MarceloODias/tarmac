@@ -19,6 +19,7 @@ from ..derive import (
     format_duration,
 )
 from ..strings import tr
+from .. import notify
 
 COLORS = {
     "ok": "",
@@ -144,6 +145,20 @@ def render_swiftbar(config: Config, view: View) -> str:
             )
         elif tl.state == "error":
             out.append(f"⚠ {tl.label}: {(tl.last_error or '')[:80]} | color={COLORS['alarm']} disabled=true")
+
+    # notification toggle, one click from the menu bar (SPEC §7.3)
+    status = notify.status_line(config.settings.notify, view.notify_muted,
+                                view.notify_mute_until, locale)
+    out.append(f"{status} | {_tarmac_cmd('notify', 'toggle')}")
+    if view.notify_muted:
+        out.append(f"-- {tr(locale, 'notify_unmute')} | {_tarmac_cmd('notify', 'on')}")
+    else:
+        # SwiftBar splits the attribute list on spaces, so every param has to be
+        # a single token: 'eod' and not 'end of day' (dates.py accepts both).
+        out.append(f"-- {tr(locale, 'notify_mute_for', when='1h')} | "
+                   f"{_tarmac_cmd('notify', 'mute', '1h')}")
+        out.append(f"-- {tr(locale, 'notify_mute_eod')} | "
+                   f"{_tarmac_cmd('notify', 'mute', 'eod')}")
 
     ago = "?"
     if view.last_collect_ms:

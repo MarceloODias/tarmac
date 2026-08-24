@@ -149,6 +149,8 @@ class Settings:
     stale_after_s: int = 60      # collect_if_stale window (SPEC §8.0)
     idle_tab_min: int = 30       # 'close resolved tabs' threshold (SPEC §9.0.1)
     permission_prompt_anomalous: bool = True  # SPEC §15.2: configurable
+    notify: bool = True          # macOS alert on entering NEEDS YOU (SPEC §7.3)
+    notify_sound: str = "Ping"   # macOS sound name; '' = notification, no sound
 
 
 @dataclass
@@ -227,5 +229,7 @@ def load_config(path: Path | None = None) -> Config:
         stale_after_s=int(s.get("stale_after_s", 60)),
         idle_tab_min=int(s.get("idle_tab_min", 30)),
         permission_prompt_anomalous=bool(s.get("permission_prompt_anomalous", True)),
+        notify=bool(s.get("notify", True)),
+        notify_sound=str(s.get("notify_sound", "Ping")),
     )
     return Config(targets=targets, settings=settings)

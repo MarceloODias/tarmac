@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from . import db as dbm
+from . import notify
 from .config import Config
 from .model import BLOCKED, IDLE, TERMINAL_STATES, WORKING
 
@@ -76,6 +77,8 @@ class View:
     other: list[Row] = field(default_factory=list)         # idle etc.
     targets: list[TargetLine] = field(default_factory=list)
     last_collect_ms: int | None = None
+    notify_muted: bool = False   # SPEC §7.3 — a silenced panel says so
+    notify_mute_until: int | None = None  # epoch ms; None = until switched back on
 
     @property
     def has_error(self) -> bool:
@@ -112,6 +115,10 @@ def build_view(
 
     last = dbm.kv_get(conn, "last_collect_at")
     view.last_collect_ms = int(last) if last else None
+    view.notify_muted = config.settings.notify and notify.is_muted(conn, now)
+    if view.notify_muted:
+        raw = notify.mute_until(conn)
+        view.notify_mute_until = None if raw == notify.FOREVER else int(raw)
 
     status_by_target = {
         r["target_id"]: r for r in conn.execute("SELECT * FROM target_status")
@@ -353,6 +360,9 @@ def badge(view: View) -> tuple[str, str]:
         parts.append("⚙⚠")
         if severity in ("ok", "info"):
             severity = "warn"
+    if view.notify_muted:
+        # a muted panel must not read as a quiet one (SPEC §7.3)
+        parts.append("🔕")
     return "  ".join(parts), severity
 
 

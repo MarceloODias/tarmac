@@ -109,6 +109,19 @@ CREATE TABLE IF NOT EXISTS kv (
   value TEXT
 );
 
+-- One row per notification we have taken responsibility for (SPEC §7.3),
+-- keyed on the `transitions` row that caused it. A session that stays blocked
+-- produces no new transition and so no new alert; the same session blocked
+-- again tomorrow is a different row and does alert. Claiming happens inside the
+-- collect transaction: that is what makes "notified twice" impossible even with
+-- two renderers collecting in the same second.
+CREATE TABLE IF NOT EXISTS notifications (
+  transition_id INTEGER PRIMARY KEY,
+  target_id     TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
+  at            INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_transitions_session
   ON transitions (target_id, session_id, at);
 """
@@ -255,3 +268,28 @@ def prune_service_sessions(conn: sqlite3.Connection, retention_h: int = 24) -> i
             (r["target_id"], r["session_id"]),
         )
     return len(rows)
+
+
+def claim_notification(conn: sqlite3.Connection, transition_id: int,
+                       target_id: str, session_id: str) -> bool:
+    """Take responsibility for notifying about one transition into blocked.
+
+    True exactly once per transition — the caller sends only when it wins the
+    claim. Losing is the normal outcome of a second collect over a session that
+    is still blocked (SPEC §7.3).
+    """
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO notifications (transition_id, target_id, session_id, at) "
+        "VALUES (?, ?, ?, ?)",
+        (transition_id, target_id, session_id, now_ms()),
+    )
+    return cur.rowcount == 1
+
+
+def prune_notifications(conn: sqlite3.Connection, retention_h: int = 168) -> int:
+    """The claim table only has to outlive the episode it guards (a week)."""
+    cur = conn.execute(
+        "DELETE FROM notifications WHERE at < ?",
+        (now_ms() - retention_h * 3_600_000,),
+    )
+    return cur.rowcount

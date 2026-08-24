@@ -107,6 +107,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--config-dir", default="",
                    help="um CLAUDE_CONFIG_DIR só (default: todos os targets locais)")
 
+    p = sub.add_parser("notify", help="alerta do macOS em PRECISA DE VOCÊ (SPEC §7.3)")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["status", "on", "off", "toggle", "mute", "test"])
+    p.add_argument("when", nargs="*",
+                   help="mute: por quanto tempo (1h, 30min, 'fim do dia'); "
+                        "vazio = até religar")
+
     p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
     p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
     p.add_argument("--due", help="prazo em linguagem natural (amanhã, segunda…)")
@@ -192,6 +199,40 @@ def main(argv: list[str] | None = None) -> None:
         for cfg in config_dirs:
             print(f"{cfg}: " + ("removido" if hookmgr.uninstall(cfg)
                                 else "não estava instalado"))
+        return
+
+    if args.cmd == "notify":
+        from . import notify as notifier
+        if args.action == "on":
+            notifier.unmute(conn)
+        elif args.action == "off":
+            notifier.mute(conn)
+        elif args.action == "toggle":
+            notifier.toggle(conn)
+        elif args.action == "mute":
+            if args.when:
+                try:
+                    until = parse_with_fallback(
+                        " ".join(args.when),
+                        default_hour=config.settings.default_hour,
+                        end_of_day_hour=config.settings.end_of_day_hour,
+                    )
+                except DateParseError as e:
+                    sys.exit(str(e))
+                notifier.mute(conn, int(until.timestamp() * 1000))
+            else:
+                notifier.mute(conn)
+        elif args.action == "test":
+            # also the way to make macOS show the permission prompt the first
+            # time: nothing is delivered until osascript is allowed to notify
+            ok = notifier.send(t("notify_title"), t("notify_body_default"),
+                               subtitle="tarmac", sound=config.settings.notify_sound)
+            print("enviada" if ok else "falhou (System Settings > Notifications)")
+        muted = notifier.is_muted(conn)
+        raw = notifier.mute_until(conn)
+        until = None if (raw is None or raw == notifier.FOREVER) else int(raw)
+        print(notifier.status_line(config.settings.notify, muted, until,
+                                   config.settings.locale))
         return
 
     if args.cmd == "task":

@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import db as dbm
+from . import notify as notifier
 from .config import Config, Target, tarmac_home
-from .model import WORKING, Session, parse_agents_json
+from .model import BLOCKED, WORKING, Session, parse_agents_json
 
 NEXT_STEPS_REMOTE = "~/.tarmac/next-steps.jsonl"
 
@@ -168,18 +169,28 @@ def _record_transition(
     to_state: str,
     at: int,
     uncertain: bool = False,
-) -> None:
-    conn.execute(
+) -> int:
+    """Returns the new row's id — the identity a notification is claimed against."""
+    cur = conn.execute(
         "INSERT INTO transitions (target_id, session_id, from_state, to_state, at, uncertain) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (target_id, session_id, from_state, to_state, at, 1 if uncertain else 0),
     )
+    return int(cur.lastrowid)
 
 
-def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
-    """Mirror one target's collection into the DB, inside one transaction."""
+def apply_result(conn: sqlite3.Connection, result: TargetResult,
+                 notify: bool = False) -> list[notifier.BlockedEvent]:
+    """Mirror one target's collection into the DB, inside one transaction.
+
+    Returns the sessions that just entered `blocked` and whose notification
+    this cycle has claimed (SPEC §7.3) — empty unless `notify`. Sending happens
+    after the commit: a claim that is never sent is a lost alert, a send that is
+    never claimed is a duplicate, and duplicates are the worse failure.
+    """
     now = dbm.now_ms()
     t = result.target
+    events: list[notifier.BlockedEvent] = []
 
     if result.sessions is None:
         # isolated failure: keep old data (marked stale by last_ok_at), back off
@@ -196,7 +207,7 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             "fail_count = excluded.fail_count, next_retry_at = excluded.next_retry_at",
             (t.id, result.error, result.error_kind, fails, now + backoff),
         )
-        return
+        return events
 
     # success: was the target unobservable before this read? (affects blocked_since)
     prev = conn.execute(
@@ -214,6 +225,13 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         (t.id, now),
     )
 
+    # A target seen for the first time (fresh DB, target just added) can hold
+    # several already-blocked sessions. Those are not news, they are the
+    # backlog: notifying would greet a new install with a burst of alerts.
+    cold_start = notify and conn.execute(
+        "SELECT 1 FROM sessions WHERE target_id = ? LIMIT 1", (t.id,)
+    ).fetchone() is None
+
     seen_ids = set()
     for s in result.sessions:
         seen_ids.add(s.session_id)
@@ -225,9 +243,11 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             (t.id, s.session_id),
         ).fetchone()
         first_seen = old["first_seen_at"] if old else now
+        entered_blocked = eff == BLOCKED and (old is None or old["eff_state"] != BLOCKED)
+        transition_id = None
         if old is None:
             # first sighting: record the entry state so blocked_since exists
-            _record_transition(conn, t.id, s.session_id, None, eff, now)
+            transition_id = _record_transition(conn, t.id, s.session_id, None, eff, now)
         elif old["eff_state"] != eff:
             if eff == WORKING:
                 # working again -> whatever the hook summarised at the last end
@@ -236,11 +256,24 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             # If it changed while we were blind, we do NOT know when: stamp the
             # start of the blind window and mark uncertain (SPEC §4.4 — show >=,
             # never a falsely precise number).
-            _record_transition(
+            transition_id = _record_transition(
                 conn, t.id, s.session_id, old["eff_state"], eff,
                 blind_start if was_blind else now,
                 uncertain=was_blind,
             )
+        # `service` sessions are automation nobody conducts, and `mine: false`
+        # is someone else's box: neither is ever waiting on this keyboard.
+        if (entered_blocked and notify and not cold_start
+                and t.mine and klass != "service" and transition_id is not None):
+            if dbm.claim_notification(conn, transition_id, t.id, s.session_id):
+                events.append(notifier.BlockedEvent(
+                    target_id=t.id,
+                    target_label=t.label,
+                    session_id=s.session_id,
+                    name=s.name or s.session_id[:8],
+                    waiting_for=s.waiting_for,
+                    cwd=s.cwd,
+                ))
         conn.execute(
             "INSERT INTO sessions (target_id, session_id, short_id, uuid, name, kind, state, "
             "  status, waiting_for, cwd, pid, started_at, first_seen_at, last_seen_at, gone, "
@@ -272,6 +305,7 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         conn.execute(
             "UPDATE sessions SET gone = 1 WHERE target_id = ? AND gone = 0", (t.id,)
         )
+    return events
 
 
 def fetch_next_steps(target: Target) -> list[dict]:
@@ -397,9 +431,15 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     if targets:
         with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
             results = list(pool.map(collect_target, targets))
+
+    # Decided once, before the transaction: a mute that expires mid-cycle must
+    # not make half the sessions notify and the other half not.
+    notify_on = config.settings.notify and not notifier.is_muted(conn)
+    events: list[notifier.BlockedEvent] = []
     with conn:
+        notifier.collect_expired(conn)
         for r in results:
-            apply_result(conn, r)
+            events.extend(apply_result(conn, r, notify=notify_on))
         # The next_step queue is per MACHINE, not per target: two config dirs on
         # one box write to the same ~/.tarmac/next-steps.jsonl. Draining it once
         # per target would let the first one swallow the other's entries — so
@@ -413,7 +453,13 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
             if entries:
                 route_next_steps(conn, group, entries)
         dbm.prune_service_sessions(conn)
+        dbm.prune_notifications(conn)
         dbm.kv_set(conn, "last_collect_at", str(now))
+    # after the commit: osascript is slow and can hang, and holding a write
+    # transaction open across it would block the other renderer's collect
+    if events:
+        notifier.dispatch(events, config.settings.locale,
+                          config.settings.notify_sound)
     return results
 
 

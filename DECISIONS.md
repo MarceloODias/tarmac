@@ -160,6 +160,10 @@ bug reintroduzido), o que me levou à causa real.
 
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.
 - `Fechar abas resolvidas` existe como `tarmac gc-tabs` (nunca automático).
-- Notificações: nenhuma, por decisão fechada da §7.
+- Notificações: a §7 as proibia; Marcelo reabriu em 23/08/2026 e a §7.3 é o
+  resultado — alerta do macOS **na transição** para `blocked`, com claim por
+  linha de `transitions` (nunca duas vezes), sem rajada em banco novo, e mute
+  com prazo para reunião. O que continua fora: push, hook `Notification`, e
+  re-alerta por escalada (>30min parado não avisa de novo).
 - Adaptadores de terminal além do iTerm2: degradação para clipboard já existe;
   Terminal.app/Ghostty/etc. ficam para a generalização pública (§15.2).

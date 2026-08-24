@@ -82,10 +82,16 @@ for an Automation permission, once per host app (Terminal, SwiftBar, …).
 | `tarmac checklist <t> <s> add "…"` | per-session checklist |
 | `tarmac logs / stop / rm / copy-resume / pin` | per-session actions |
 | `tarmac gc-tabs` | close tabs of no-longer-blocked sessions (never automatic) |
+| `tarmac notify [on\|off\|mute 1h\|test]` | macOS alert when a session starts needing you |
 
 ## Limitations, plainly
 
-- No notifications, by design: the badge/panel *is* the alert.
+- A macOS notification fires when a session *enters* NEEDS YOU — once per
+  episode, never for `service` sessions or someone else's box, and never as a
+  burst on a cold database. Silence it with `N` in the panel, the menu-bar
+  item, or `tarmac notify mute 1h` (a timed mute switches itself back on, which
+  is the one to use before a meeting). Muted panels show `🔕` in the badge.
+  It only fires while the panel is running — the panel is what collects.
 - Session aliases are local to the panel; `claude --resume <alias>` won't
   resolve them (resume always uses the UUID).
 - Inline replies to blocked sessions don't work — the CLI refuses to attach a
