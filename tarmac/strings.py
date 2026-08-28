@@ -33,6 +33,7 @@ STRINGS = {
         "reschedule": "Reschedule…",
         "overdue_ago": "overdue {ago}",
         "offline_for": "offline for {ago}",
+        "stale_for": "not read for {ago}",
         "last_read": "last read {when}",
         "active": "active",
         "stuck": "stuck",
@@ -106,6 +107,21 @@ STRINGS = {
         "focused": "focused",
         "iterm_copied": "iTerm2 unavailable ({msg}). Command copied to the clipboard: {cmd}",
         "iterm_manual": "iTerm2 unavailable ({msg}). Command to paste manually: {cmd}",
+        "confirm_respawn": "Restart the process of {name}?\n"
+                           "It picks the conversation up where it stopped.",
+        "respawned": "restarted",
+        "no_short_id_respawn": "session without short_id — respawn only exists "
+                               "for background sessions",
+        "bind_respawn": "respawn",
+        # `waitingFor`, as documented in the agent view reference. Unknown values
+        # render as they arrive: the field is the CLI's, not ours, and a value we
+        # have never seen is still worth showing.
+        "blocked_generic": "blocked",
+        "wf_permission prompt": "permission prompt",
+        "wf_input needed": "waiting for an answer",
+        "wf_sandbox request": "sandbox request",
+        "wf_worker request": "worker request",
+        "wf_dialog open": "dialog open",
     },
     "pt": {
         "for_today": "PRA HOJE",
@@ -134,6 +150,7 @@ STRINGS = {
         "reschedule": "Reagendar…",
         "overdue_ago": "venceu há {ago}",
         "offline_for": "offline há {ago}",
+        "stale_for": "sem leitura há {ago}",
         "last_read": "última leitura {when}",
         "active": "ativas",
         "stuck": "travada",
@@ -207,8 +224,34 @@ STRINGS = {
         "focused": "focado",
         "iterm_copied": "iTerm2 indisponível ({msg}). Comando copiado para o clipboard: {cmd}",
         "iterm_manual": "iTerm2 indisponível ({msg}). Comando para colar manualmente: {cmd}",
+        "confirm_respawn": "Reiniciar o processo de {name}?\n"
+                           "A conversa continua de onde parou.",
+        "respawned": "reiniciada",
+        "no_short_id_respawn": "sessão sem short_id — respawn só existe para "
+                               "sessões background",
+        "bind_respawn": "respawn",
+        "blocked_generic": "bloqueada",
+        "wf_permission prompt": "pedido de permissão",
+        "wf_input needed": "esperando resposta",
+        "wf_sandbox request": "pedido do sandbox",
+        "wf_worker request": "pedido do worker",
+        "wf_dialog open": "diálogo aberto",
     },
 }
+
+
+def waiting_label(locale: str, raw: str | None) -> str:
+    """`waitingFor` in the panel's language.
+
+    The five values the agent view documents get a translation; anything else
+    is shown verbatim. The JSON is a research preview and this field is its
+    vocabulary — a value we do not know is news, not an error, and hiding it
+    behind a generic 'blocked' would throw away the only thing the row says
+    about what it is waiting for.
+    """
+    if not raw:
+        return tr(locale, "blocked_generic")
+    return tr(locale, f"wf_{raw}") if f"wf_{raw}" in STRINGS["en"] else raw
 
 _locale = "en"
 

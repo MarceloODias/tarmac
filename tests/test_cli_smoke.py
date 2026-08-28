@@ -124,14 +124,60 @@ def test_task_lifecycle(cli):
     assert "dividir os rampids" not in cli("task").stdout
 
 
-def test_hook_is_off_by_default_and_installs_with_guards(cli):
-    assert "instalado: False" in cli("hook", "status").stdout
-    out = cli("hook", "install", "--exclude", "/svc", "--max-day", "5").stdout
-    assert "TARMAC_NEXTSTEP_MAX_DAY=5" in out
+def test_hooks_are_off_by_default_and_install_together(cli):
+    status = cli("hook", "status").stdout
+    assert "next-step: instalado: False" in status
+    assert "needs-you: instalado: False" in status
+
+    out = cli("hook", "install", "--exclude", "/svc").stdout
     assert "TARMAC_NEXTSTEP_EXCLUDE=/svc" in out
-    assert "instalado: True" in cli("hook", "status").stdout
+    assert "stop-next-step.sh" in out and "notification-needs-you.sh" in out
+    # the old hook was the one that spent money; nothing here does
+    assert "nenhum dos dois gasta API" in out
+
+    status = cli("hook", "status").stdout
+    assert "next-step: instalado: True" in status
+    assert "needs-you: instalado: True" in status
+
     assert "removido" in cli("hook", "uninstall").stdout
-    assert "instalado: False" in cli("hook", "status").stdout
+    assert "instalado: True" not in cli("hook", "status").stdout
+
+
+def test_installing_one_hook_leaves_the_other_off(cli):
+    cli("hook", "install", "--which", "needs-you")
+    status = cli("hook", "status").stdout
+    assert "needs-you: instalado: True" in status
+    assert "next-step: instalado: False" in status
+
+
+def test_a_legacy_sessionend_hook_is_reported_and_removed(cli, tmp_path):
+    """It is the one that spends: an upgrade must not leave it running."""
+    settings = tmp_path / "fakehome" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [
+        {"type": "command",
+         "command": 'TARMAC_NEXTSTEP_MAX_DAY=20 "$HOME/.tarmac/session-end-next-step.sh"'}]}]}}))
+    assert "hook ANTIGO" in cli("hook", "status").stdout
+    cli("hook", "install")
+    assert "hook ANTIGO" not in cli("hook", "status").stdout
+    assert "SessionEnd" not in json.loads(settings.read_text())["hooks"]
+
+
+def test_poke_reads_only_the_local_targets(cli):
+    cli("collect", "--force")
+    out = cli("poke").stdout
+    assert "local: ok" in out
+
+
+def test_daemon_status_reaches_the_target(cli):
+    assert "Local" in cli("daemon").stdout
+
+
+def test_respawn_needs_a_background_session(cli):
+    cli("collect", "--force")
+    cli("respawn", "local", "abc12345")
+    interactive = "dddd1111-2222-3333-4444-555566667777"
+    assert cli("respawn", "local", interactive, expect_ok=False).returncode != 0
 
 
 def test_hook_install_preserves_other_settings(cli, tmp_path):
@@ -147,5 +193,6 @@ def test_hook_install_preserves_other_settings(cli, tmp_path):
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "outro-script.sh"
     cli("hook", "uninstall")
     data = json.loads(settings.read_text())
-    assert "SessionEnd" not in data["hooks"]
+    assert "Stop" not in data["hooks"]
+    assert "Notification" not in data["hooks"]
     assert "SessionStart" in data["hooks"]

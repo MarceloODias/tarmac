@@ -20,7 +20,7 @@ from tarmac.render.tui_app import TarmacApp
 from tarmac.tasks import add_task
 
 # every binding the panel exposes, minus quit
-KEYS = ["enter", "c", "C", "p", "m", "a", "n", "N", "l", "x", "S", "u", "t"]
+KEYS = ["enter", "c", "C", "p", "m", "a", "n", "N", "l", "x", "S", "r", "u", "t"]
 
 
 @pytest.fixture
@@ -193,3 +193,34 @@ async def test_remove_asks_and_then_calls_claude_rm(panel):
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert "rm blk00001" in claude_log.read_text()
+
+
+async def test_respawn_asks_and_then_calls_claude_respawn(panel):
+    """`r` restarts the process of a session that stopped responding.
+
+    It sits one shift away from `R` (remove from the list), which is why it
+    asks before doing anything: the two keys are neighbours and only one of
+    them is recoverable."""
+    config, tmp_path, calls, claude_log = panel
+    app = TarmacApp(config)
+    async with app.run_test(size=(160, 60)) as pilot:
+        await pilot.pause()
+        ol = app.query_one("#sessions", OptionList)
+        ol.highlighted = next(
+            i for i in range(ol.option_count)
+            if (o := ol.get_option_at_index(i)) is not None and o.id == "mac|blk00001"
+        )
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.press("escape")          # cancelling must not restart anything
+        await app.workers.wait_for_complete()
+        assert "respawn blk00001" not in (claude_log.read_text()
+                                          if claude_log.exists() else "")
+
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.press("enter")           # confirm
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "respawn blk00001" in claude_log.read_text()
+        assert app.is_running

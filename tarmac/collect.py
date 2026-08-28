@@ -112,6 +112,19 @@ class TargetResult:
 
 
 def collect_target(target: Target) -> TargetResult:
+    """Never raises.
+
+    The pool re-raises into the caller, so one unforeseen exception here used
+    to take down the whole cycle — every other target included.
+    """
+    try:
+        return _collect_target(target)
+    except Exception as e:
+        return TargetResult(target, None, error=f"{type(e).__name__}: {e}"[:500],
+                            error_kind="error")
+
+
+def _collect_target(target: Target) -> TargetResult:
     cmd = build_command(target)
     try:
         proc = subprocess.run(
@@ -179,6 +192,68 @@ def _record_transition(
     return int(cur.lastrowid)
 
 
+def record_failure(conn: sqlite3.Connection, t: Target,
+                   error: str | None, kind: str | None) -> None:
+    """Mark one target as failing, with backoff. Rows stay — stale, not gone.
+
+    Reached both from a target that answered badly and from one whose mirroring
+    raised: as far as the panel is concerned those are the same event, a target
+    it could not read this cycle, and both must leave a trace. A failure that
+    writes nothing is what let a broken collect read as a healthy one.
+    """
+    now = dbm.now_ms()
+    row = conn.execute(
+        "SELECT fail_count FROM target_status WHERE target_id = ?", (t.id,)
+    ).fetchone()
+    fails = (row["fail_count"] if row else 0) + 1
+    backoff = BACKOFF_MS[min(fails - 1, len(BACKOFF_MS) - 1)]
+    conn.execute(
+        "INSERT INTO target_status (target_id, last_error, error_kind, fail_count, next_retry_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(target_id) DO UPDATE SET "
+        "last_error = excluded.last_error, error_kind = excluded.error_kind, "
+        "fail_count = excluded.fail_count, next_retry_at = excluded.next_retry_at",
+        (t.id, error, kind, fails, now + backoff),
+    )
+
+
+def _guarded(conn: sqlite3.Connection, name: str, fn):
+    """Run one step of the cycle in its own savepoint; returns (result, error).
+
+    The cycle writes many independent things under a single transaction. Any
+    one of them raising used to discard all of it and escape the process — and
+    a panel that cannot finish a collect keeps drawing its last good frame,
+    which is the one failure a status panel must never have. Now a failing step
+    is rolled back alone and the rest of the cycle — above all `last_collect_at`
+    and the other targets — still lands.
+
+    `name` is a SQL identifier, so it is always a literal at the call site.
+    """
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        out = fn()
+    except Exception as e:
+        conn.execute(f"ROLLBACK TO {name}")
+        conn.execute(f"RELEASE {name}")
+        return None, e
+    conn.execute(f"RELEASE {name}")
+    return out, None
+
+
+def _step(conn: sqlite3.Connection, name: str, fn) -> None:
+    """A guarded step whose failure has no target to be attributed to.
+
+    Nothing in the session list depends on these (mute expiry, next_step
+    enrichment, pruning), so a failure must not stop the cycle — but it does
+    not get to vanish either: silence is what this whole change is about. The
+    error lands in kv, where `tarmac stats` and a DB read can find it.
+    """
+    _, err = _guarded(conn, name, fn)
+    if err is not None:
+        dbm.kv_set(conn, f"last_error:{name}",
+                   f"{dbm.now_ms()} {type(err).__name__}: {err}"[:500])
+
+
 def apply_result(conn: sqlite3.Connection, result: TargetResult,
                  notify: bool = False) -> list[notifier.BlockedEvent]:
     """Mirror one target's collection into the DB, inside one transaction.
@@ -194,19 +269,7 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult,
 
     if result.sessions is None:
         # isolated failure: keep old data (marked stale by last_ok_at), back off
-        row = conn.execute(
-            "SELECT fail_count FROM target_status WHERE target_id = ?", (t.id,)
-        ).fetchone()
-        fails = (row["fail_count"] if row else 0) + 1
-        backoff = BACKOFF_MS[min(fails - 1, len(BACKOFF_MS) - 1)]
-        conn.execute(
-            "INSERT INTO target_status (target_id, last_error, error_kind, fail_count, next_retry_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(target_id) DO UPDATE SET "
-            "last_error = excluded.last_error, error_kind = excluded.error_kind, "
-            "fail_count = excluded.fail_count, next_retry_at = excluded.next_retry_at",
-            (t.id, result.error, result.error_kind, fails, now + backoff),
-        )
+        record_failure(conn, t, result.error, result.error_kind)
         return events
 
     # success: was the target unobservable before this read? (affects blocked_since)
@@ -414,11 +477,19 @@ def apply_next_steps(conn: sqlite3.Connection, target: Target, entries: list[dic
         )
 
 
-def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> list[TargetResult]:
-    """Collect every enabled target in parallel and mirror into the DB."""
+def collect(config: Config, conn: sqlite3.Connection, force: bool = False,
+            local_only: bool = False) -> list[TargetResult]:
+    """Collect every enabled target in parallel and mirror into the DB.
+
+    `local_only` is what a Notification hook fires (`tarmac poke`, SPEC §7.3):
+    the event says a session on THIS machine started waiting, and reading it
+    must not drag every ssh target — with its 15s timeout — along for the ride.
+    """
     now = dbm.now_ms()
     targets = []
-    for t in config.enabled_targets():
+    sources = [t for t in config.enabled_targets()
+               if not local_only or t.transport == "local"]
+    for t in sources:
         if not force:
             row = conn.execute(
                 "SELECT next_retry_at FROM target_status WHERE target_id = ?", (t.id,)
@@ -437,9 +508,19 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     notify_on = config.settings.notify and not notifier.is_muted(conn)
     events: list[notifier.BlockedEvent] = []
     with conn:
-        notifier.collect_expired(conn)
+        _step(conn, "expire", lambda: notifier.collect_expired(conn))
         for r in results:
-            events.extend(apply_result(conn, r, notify=notify_on))
+            ev, err = _guarded(
+                conn, "apply", lambda r=r: apply_result(conn, r, notify=notify_on)
+            )
+            if err is None:
+                events.extend(ev or [])
+                continue
+            # An internal failure IS the target's failure from where the panel
+            # sits: record it so the rows go stale and loud instead of quietly
+            # keeping the state they had before the bug.
+            _guarded(conn, "apply_failed", lambda r=r, err=err: record_failure(
+                conn, r.target, f"{type(err).__name__}: {err}"[:500], "error"))
         # The next_step queue is per MACHINE, not per target: two config dirs on
         # one box write to the same ~/.tarmac/next-steps.jsonl. Draining it once
         # per target would let the first one swallow the other's entries — so
@@ -449,11 +530,10 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
             if r.sessions is not None:  # only drain machines we can reach
                 per_machine.setdefault(machine_key(r.target), []).append(r.target)
         for group in per_machine.values():
-            entries = fetch_next_steps(group[0])
-            if entries:
-                route_next_steps(conn, group, entries)
-        dbm.prune_service_sessions(conn)
-        dbm.prune_notifications(conn)
+            _step(conn, "next_steps", lambda group=group: route_next_steps(
+                conn, group, fetch_next_steps(group[0])))
+        _step(conn, "prune", lambda: (dbm.prune_service_sessions(conn),
+                                      dbm.prune_notifications(conn)))
         dbm.kv_set(conn, "last_collect_at", str(now))
     # after the commit: osascript is slow and can hang, and holding a write
     # transaction open across it would block the other renderer's collect

@@ -147,6 +147,7 @@ class Settings:
     end_of_day_hour: int = 18
     service_stuck_min: int = 30  # service blocked alert threshold (SPEC §3.3)
     stale_after_s: int = 60      # collect_if_stale window (SPEC §8.0)
+    stale_data_after_s: int = 300  # data older than this is not to be trusted
     idle_tab_min: int = 30       # 'close resolved tabs' threshold (SPEC §9.0.1)
     permission_prompt_anomalous: bool = True  # SPEC §15.2: configurable
     notify: bool = True          # macOS alert on entering NEEDS YOU (SPEC §7.3)
@@ -227,6 +228,7 @@ def load_config(path: Path | None = None) -> Config:
         end_of_day_hour=int(s.get("end_of_day_hour", 18)),
         service_stuck_min=int(s.get("service_stuck_min", 30)),
         stale_after_s=int(s.get("stale_after_s", 60)),
+        stale_data_after_s=int(s.get("stale_data_after_s", 300)),
         idle_tab_min=int(s.get("idle_tab_min", 30)),
         permission_prompt_anomalous=bool(s.get("permission_prompt_anomalous", True)),
         notify=bool(s.get("notify", True)),

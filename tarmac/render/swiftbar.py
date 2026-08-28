@@ -18,7 +18,7 @@ from ..derive import (
     badge,
     format_duration,
 )
-from ..strings import tr
+from ..strings import tr, waiting_label
 from .. import notify
 
 COLORS = {
@@ -112,7 +112,7 @@ def render_swiftbar(config: Config, view: View) -> str:
     section(tr(locale, "needs_you"), [
         line
         for row in view.blocked
-        for line in _session_line(row, "⏸", f"{row.waiting_for or 'blocked'}   {_wait_str(row)}", locale)
+        for line in _session_line(row, "⏸", f"{waiting_label(locale, row.waiting_for)}   {_wait_str(row)}", locale)
     ])
     section(tr(locale, "working"), [
         line
@@ -145,6 +145,12 @@ def render_swiftbar(config: Config, view: View) -> str:
             )
         elif tl.state == "error":
             out.append(f"⚠ {tl.label}: {(tl.last_error or '')[:80]} | color={COLORS['alarm']} disabled=true")
+        elif tl.state == "stale":
+            ago = format_duration(tl.age_s or 0)
+            out.append(
+                f"⏳ {tl.label} · {tr(locale, 'stale_for', ago=ago)} | "
+                f"color={COLORS['warn']} disabled=true"
+            )
 
     # notification toggle, one click from the menu bar (SPEC §7.3)
     status = notify.status_line(config.settings.notify, view.notify_muted,

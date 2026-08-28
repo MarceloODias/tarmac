@@ -585,3 +585,38 @@ async def test_every_label_forms_one_column_in_the_real_app(mixed_app, width):
         assert columns.get("Personal"), "the account row did not render"
         assert len(columns["Mac"]) == 1, f"target in several columns: {columns}"
         assert len(columns["Personal"]) == 1, f"account in several columns: {columns}"
+
+
+# --- `waitingFor` in the panel's language (agent view documents five values) --
+
+def _pending(row_kwargs, locale="en"):
+    from tarmac.derive import Row
+    from tarmac.render.rows import pending_text
+    base = dict(target_id="t1", target_label="T1", session_id="s", display_name="s",
+                eff_state="blocked", kind="background", cwd="/p", short_id="s",
+                uuid="u", gone=False, stale=False, pid=42)
+    base.update(row_kwargs)
+    return pending_text(Row(**base), locale).plain
+
+
+def test_waiting_for_is_translated_in_both_locales():
+    assert _pending({"waiting_for": "input needed"}, "en") == "waiting for an answer"
+    assert _pending({"waiting_for": "input needed"}, "pt") == "esperando resposta"
+    assert _pending({"waiting_for": "dialog open"}, "pt") == "diálogo aberto"
+
+
+def test_a_permission_prompt_keeps_its_warning_sign():
+    text = _pending({"waiting_for": "permission prompt", "permission_prompt": True})
+    assert text == "⚠ permission prompt"
+
+
+def test_a_waiting_for_we_have_never_seen_is_shown_as_it_arrives():
+    """The field is the CLI's vocabulary, not ours: a new value is news, and
+    replacing it with a generic 'blocked' would throw away the only thing the
+    row says about what it is waiting on."""
+    assert _pending({"waiting_for": "quantum handshake"}) == "quantum handshake"
+
+
+def test_a_blocked_session_with_no_waiting_for_still_says_so():
+    assert _pending({"waiting_for": None}, "en") == "blocked"
+    assert _pending({"waiting_for": None}, "pt") == "bloqueada"

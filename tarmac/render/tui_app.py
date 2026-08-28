@@ -3,7 +3,7 @@ revised by Marcelo: interactive now).
 
 Keys: ↑/↓ navigate · Enter open-or-focus the session's iTerm tab · c copy
 resume · p pin · m reminder · a defer · l logs · x resolve · S stop ·
-u refresh · q quit.
+r respawn · u refresh · q quit.
 """
 
 from __future__ import annotations
@@ -159,6 +159,7 @@ class TarmacApp(App):
         Binding("l", "logs", "bind_logs"),
         Binding("x", "resolve", "bind_resolve"),
         Binding("S", "stop", "bind_stop"),
+        Binding("r", "respawn", "bind_respawn"),
         Binding("R", "remove", "bind_remove"),
         Binding("N", "notify_toggle", "bind_notify"),
         Binding("u", "refresh", "bind_refresh"),
@@ -281,6 +282,9 @@ class TarmacApp(App):
                 extra += f"   [dim]{tl.label} {tr(locale, 'offline_for', ago=format_duration(tl.age_s or 0))}[/dim]"
             elif tl.state == "error":
                 extra += f"   [red]⚠ {tl.label}[/red]"
+            elif tl.state == "stale":
+                extra += (f"   [yellow]⏳ {tl.label} "
+                          f"{tr(locale, 'stale_for', ago=format_duration(tl.age_s or 0))}[/yellow]")
         badge_widget.update(
             f"[{BADGE_STYLE.get(severity, '')}]  {text}  [/]" + extra
         )
@@ -623,6 +627,39 @@ class TarmacApp(App):
 
         self.push_screen(
             ConfirmPrompt(self._t("confirm_stop", name=row.display_name),
+                          self._t("confirm_hint")), handle)
+
+    def action_respawn(self) -> None:
+        """`r`: restart the session's process (`claude respawn`).
+
+        The row this is for: a background session that stopped responding — its
+        host process died, or the machine slept mid-response. Before this the
+        only keys that reached such a row were S (stop) and R (remove from the
+        list), both of which throw the work away. Respawn keeps the
+        conversation and starts a process for it again.
+        """
+        cur = self._current()
+        if cur is None:
+            return
+        target, row = cur
+        if not row.short_id:
+            self.notify(self._t("no_short_id_respawn"), severity="warning")
+            return
+
+        def handle(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def work():
+                proc = actions.remote_claude(target, "respawn", row.short_id)
+                msg = (proc.stdout or proc.stderr).strip()
+                collect(self.config, connect(), force=True)
+                self.call_from_thread(self.notify, msg or self._t("respawned"))
+                self.call_from_thread(self.refresh_data)
+            self.run_worker(work, thread=True, group='actions')
+
+        self.push_screen(
+            ConfirmPrompt(self._t("confirm_respawn", name=row.display_name),
                           self._t("confirm_hint")), handle)
 
     def action_remove(self) -> None:

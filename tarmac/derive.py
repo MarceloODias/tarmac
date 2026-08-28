@@ -61,7 +61,9 @@ class ServiceLine:
 class TargetLine:
     target_id: str
     label: str
-    state: str                  # 'ok' | 'offline' | 'error'
+    # 'stale' is not a kind of failure — it is data that got old without one,
+    # which is the case a panel is most likely to render as healthy.
+    state: str                  # 'ok' | 'stale' | 'offline' | 'error'
     last_error: str | None
     age_s: int | None           # seconds since last successful read
 
@@ -83,6 +85,10 @@ class View:
     @property
     def has_error(self) -> bool:
         return any(t.state == "error" for t in self.targets)
+
+    @property
+    def has_stale(self) -> bool:
+        return any(t.state == "stale" for t in self.targets)
 
 
 def _wait_of(conn: sqlite3.Connection, r: sqlite3.Row, now: int) -> tuple[int | None, bool]:
@@ -124,15 +130,22 @@ def build_view(
         r["target_id"]: r for r in conn.execute("SELECT * FROM target_status")
     }
     wanted: dict[str, object] = {}
+    # Targets whose rows may no longer reflect reality — a failing read, or a
+    # last successful one too old to trust.
+    stale_targets: set[str] = set()
     for t in config.enabled_targets():
         if mine_only and not t.mine:
             continue
         wanted[t.id] = t
         st = status_by_target.get(t.id)
         if st is None:
+            # never read: no data yet, so no old data either
             view.targets.append(TargetLine(t.id, t.label, "ok", None, None))
             continue
         age = (now - st["last_ok_at"]) // 1000 if st["last_ok_at"] else None
+        too_old = age is not None and age >= config.settings.stale_data_after_s
+        if st["error_kind"] or too_old:
+            stale_targets.add(t.id)
         if st["error_kind"] is None or (st["fail_count"] or 0) < t.offline_after:
             state = "ok" if st["error_kind"] is None else (
                 # failing but under the offline_after threshold: keep calm only
@@ -143,6 +156,14 @@ def build_view(
             state = st["error_kind"]
         if state == "offline" and not t.expect_intermittent:
             state = "error"  # unexpected unreachability is loud (SPEC §4.4)
+        # Data has an age of its own, independent of whether the last attempt
+        # reported anything. A collect that dies before it can record a failure
+        # leaves error_kind NULL forever, and the panel then draws a frozen
+        # frame as a healthy one — which is how a nine-hour-old list once read
+        # as current. Age is the check that does not depend on the failure
+        # path working.
+        if state == "ok" and too_old:
+            state = "stale"
         view.targets.append(TargetLine(t.id, t.label, state, st["last_error"], age))
 
     service_agg: dict[tuple[str, str], ServiceLine] = {}
@@ -152,8 +173,7 @@ def build_view(
         t = wanted.get(r["target_id"])
         if t is None:
             continue
-        st = status_by_target.get(r["target_id"])
-        stale = bool(st and st["error_kind"])
+        stale = r["target_id"] in stale_targets
         meta = dbm.get_meta(conn, r["target_id"], r["session_id"])
         eff = r["eff_state"] or "unknown"
 
@@ -354,6 +374,13 @@ def badge(view: View) -> tuple[str, str]:
             parts.append("✓")
     if view.has_error:
         parts.append("⚠")
+        if severity in ("ok", "info"):
+            severity = "warn"
+    if view.has_stale:
+        # Without this the badge reports on data it has no reason to believe —
+        # a "✓" that means "nothing was waiting on you the last time I could
+        # look", rendered identically to "nothing is waiting on you".
+        parts.append("⏳")
         if severity in ("ok", "info"):
             severity = "warn"
     if any(s.stuck for s in view.services):

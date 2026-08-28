@@ -32,6 +32,7 @@ if [ ! -x "$BIN" ]; then
 else
   check "$BIN" --help
   check "$BIN" collect --force
+  check "$BIN" poke
   check "$BIN" render --format swiftbar
   check "$BIN" render --format tui --once
   check "$BIN" stats
@@ -52,11 +53,13 @@ if [ -x "$BIN" ]; then
   case "$before" in *": on"|*": ligadas") "$BIN" notify on >/dev/null ;; esac
 fi
 
-step "hook de custo desligado por padrão"
-if "$BIN" hook status 2>/dev/null | grep -q "instalado: True"; then
-  printf '  ! hook INSTALADO — cada sessão encerrada gasta API\n'
+step "hooks (nenhum gasta API desde a v0.2)"
+"$BIN" hook status 2>/dev/null | grep "instalado" | sed 's/^/  /'
+if "$BIN" hook status 2>/dev/null | grep -q "hook ANTIGO"; then
+  printf '  ✗ hook SessionEnd antigo ainda instalado — ele GASTA a cada sessão\n'
+  printf '    remova com: %s hook install\n' "$BIN"; fail=1
 else
-  printf '  ✓ hook off\n'
+  printf '  ✓ nenhum hook antigo de SessionEnd\n'
 fi
 
 step "coleta funciona no ambiente pobre em que o painel roda"

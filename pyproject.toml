@@ -26,6 +26,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tarmac"]
+# the hooks have to travel inside the wheel: `tarmac hook install` from the
+# installed binary looked for ../hooks/ and died with FileNotFoundError, so only
+# a repo checkout could ever install (or update) a hook.
+force-include = { "hooks/stop-next-step.sh" = "tarmac/hooks/stop-next-step.sh", "hooks/notification-needs-you.sh" = "tarmac/hooks/notification-needs-you.sh" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

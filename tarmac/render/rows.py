@@ -31,7 +31,7 @@ from ..derive import (
     account_width,
     format_duration,
 )
-from ..strings import tr
+from ..strings import tr, waiting_label
 
 CWD_STYLE = "#8c8c8c"
 
@@ -130,8 +130,8 @@ def pending_text(row: Row, locale: str) -> Text:
     elif row.due_at:
         parts.append(row.due_label or "")
     if row.eff_state == "blocked":
-        parts.append("⚠ permission prompt" if row.permission_prompt
-                      else (row.waiting_for or "blocked"))
+        label = waiting_label(locale, row.waiting_for)
+        parts.append(f"⚠ {label}" if row.permission_prompt else label)
         if row.kind == "background" and row.pid is None:
             # no live worker: attach may fail ("no saved transcript"). Say the
             # fact, not a guess — R removes it from the list.

@@ -25,6 +25,7 @@ be indistinguishable from a quiet one.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -37,6 +38,18 @@ from .strings import tr
 # row going (stale) once when `claude` fell off PATH. osascript is a system
 # binary — /usr/bin is not a guess.
 OSASCRIPT = "/usr/bin/osascript"
+
+
+def osascript_bin() -> str:
+    """The binary `send` runs. TARMAC_OSASCRIPT overrides it.
+
+    The override exists so a test can watch a real `tarmac poke` deliver a real
+    notification without a real alert appearing on the screen: the notification
+    path is a subprocess boundary, and every bug that reached Marcelo lived
+    outside the layer a mock covers.
+    """
+    return os.environ.get("TARMAC_OSASCRIPT") or OSASCRIPT
+
 
 MUTE_KEY = "notify_mute_until"
 FOREVER = "forever"
@@ -156,7 +169,7 @@ def send(title: str, message: str, subtitle: str = "", sound: str = "") -> bool:
         script += f' sound name "{_escape(sound)}"'
     try:
         proc = subprocess.run(
-            [OSASCRIPT, "-e", script],
+            [osascript_bin(), "-e", script],
             capture_output=True, text=True, timeout=10,
         )
         return proc.returncode == 0

@@ -126,6 +126,35 @@ CREATE INDEX IF NOT EXISTS idx_transitions_session
   ON transitions (target_id, session_id, at);
 """
 
+# Bumped once per entry appended to MIGRATIONS.
+SCHEMA_VERSION = 1
+
+
+def _migration_1_notifications(conn: sqlite3.Connection) -> None:
+    """Rebuild a `notifications` table that predates the transition_id key.
+
+    The claim table shipped created with CREATE TABLE IF NOT EXISTS. A database
+    built by an earlier draft of the same feature already held a table by that
+    name keyed on (target_id, session_id, blocked_at) — so IF NOT EXISTS did
+    nothing, and every collect afterwards died on "no column named
+    transition_id". The panel then rendered its last good frame for nine hours,
+    calling a day-old list current.
+
+    Only a drifted table is dropped; SCHEMA recreates it. A correct one holds
+    live claims, and discarding those would re-announce sessions that were
+    already announced — the duplicate alert this table exists to prevent.
+    """
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)")}
+    if cols and "transition_id" not in cols:
+        conn.execute("DROP TABLE notifications")
+
+
+# (version, step). A step runs when the database sits below its version; steps
+# may DROP a drifted table, because SCHEMA runs afterwards and rebuilds it.
+MIGRATIONS: list[tuple[int, object]] = [
+    (1, _migration_1_notifications),
+]
+
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -140,8 +169,36 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Bring a database up to SCHEMA_VERSION. Returns the version it came in at.
+
+    CREATE TABLE IF NOT EXISTS builds a new database well, and is blind to a
+    table that already exists with the WRONG shape — which is how the panel
+    froze once already. So drift is repaired here, explicitly and versioned;
+    the SCHEMA statements only fill in what is genuinely missing.
+    """
+    fresh = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+    ).fetchone() is None
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if not fresh:
+        # A fresh database is created AT SCHEMA_VERSION by the statements
+        # below; running the steps over it would repair nothing and could undo
+        # what SCHEMA just built correctly.
+        for target_version, step in MIGRATIONS:
+            if target_version > version:
+                with conn:
+                    step(conn)
+    conn.executescript(SCHEMA)
+    if version != SCHEMA_VERSION:
+        # not parameterizable: PRAGMA takes a literal
+        conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+    return version
 
 
 def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
