@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import accounts as accts
 from . import actions
 from . import db as dbm
 from .collect import collect, collect_if_stale
@@ -32,7 +33,9 @@ def _require_target(config: Config, target_id: str):
 
 
 def _find_row(config: Config, conn, target_id: str, session_id: str):
-    view = build_view(config, conn, mine_only=False)
+    # account_filter=False: `A` hides an account from the LIST; a command that
+    # already names its target and session must still reach it (accounts.py)
+    view = build_view(config, conn, mine_only=False, account_filter=False)
     for bucket in (view.overdue, view.blocked, view.working, view.scheduled,
                    view.done, view.other):
         for row in bucket:
@@ -126,6 +129,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("when", nargs="*",
                    help="mute: por quanto tempo (1h, 30min, 'fim do dia'); "
                         "vazio = até religar")
+
+    p = sub.add_parser("account", help="omite uma conta da lista (`A` no painel)")
+    p.add_argument("which", nargs="?",
+                   help="conta a omitir (Personal, default…), 'all' para "
+                        "mostrar todas, 'next' para avançar; vazio = status")
 
     p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
     p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
@@ -280,6 +288,25 @@ def main(argv: list[str] | None = None) -> None:
         until = None if (raw is None or raw == notifier.FOREVER) else int(raw)
         print(notifier.status_line(config.settings.notify, muted, until,
                                    config.settings.locale))
+        return
+
+    if args.cmd == "account":
+        locale = config.settings.locale
+        if args.which == "next":
+            if not accts.can_omit(config):
+                sys.exit(t("account_only_one"))
+            accts.cycle(conn, config)   # cycle() stores the new state itself
+        elif args.which:
+            try:
+                accts.set_omitted(conn, accts.resolve(config, args.which, locale))
+            except ValueError as e:
+                sys.exit(str(e))
+        omit = accts.effective(conn, config)
+        print(t("account_showing_all") if omit is None
+              else t("account_omitting", account=accts.label(omit, locale)))
+        for account in accts.names(config):
+            mark = "⊘" if account == omit else " "
+            print(f" {mark} {accts.label(account, locale)}")
         return
 
     if args.cmd == "task":

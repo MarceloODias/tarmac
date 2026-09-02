@@ -19,7 +19,7 @@ from ..derive import (
     format_duration,
 )
 from ..strings import tr, waiting_label
-from .. import notify
+from .. import accounts, notify
 
 COLORS = {
     "ok": "",
@@ -165,6 +165,25 @@ def render_swiftbar(config: Config, view: View) -> str:
                    f"{_tarmac_cmd('notify', 'mute', '1h')}")
         out.append(f"-- {tr(locale, 'notify_mute_eod')} | "
                    f"{_tarmac_cmd('notify', 'mute', 'eod')}")
+
+    # account filter, the menu-bar twin of `A` in the TUI (accounts.py)
+    if accounts.can_omit(config):
+        status = (tr(locale, "account_showing_all") if view.omitted_account is None
+                  else tr(locale, "account_omitting", account=view.omitted_label))
+        out.append(f"{status} | {_tarmac_cmd('account', 'next')}")
+        out.append(f"-- {tr(locale, 'account_show_all')} | "
+                   f"{_tarmac_cmd('account', 'all')}")
+        for account in accounts.names(config):
+            if account == view.omitted_account:
+                continue
+            # SwiftBar splits the attribute list on spaces, so a param has to
+            # be one token: an account named "Side Projects" is reachable by
+            # cycling with the line above, not by its own item.
+            arg = account or "default"
+            if " " in arg:
+                continue
+            out.append(f"-- {tr(locale, 'account_omit', account=accounts.label(account, locale))}"
+                       f" | {_tarmac_cmd('account', arg)}")
 
     ago = "?"
     if view.last_collect_ms:

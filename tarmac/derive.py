@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 
+from . import accounts
 from . import db as dbm
 from . import notify
 from .config import Config
@@ -51,6 +52,7 @@ class Row:
 class ServiceLine:
     target_id: str
     target_label: str
+    target_account: str
     label: str
     active: int
     stuck: int                  # blocked beyond threshold
@@ -81,6 +83,10 @@ class View:
     last_collect_ms: int | None = None
     notify_muted: bool = False   # SPEC §7.3 — a silenced panel says so
     notify_mute_until: int | None = None  # epoch ms; None = until switched back on
+    # the account omitted from this view (`A` in the TUI), None = none omitted.
+    # "" is a real value: it is the default account (see accounts.py).
+    omitted_account: str | None = None
+    omitted_label: str = ""      # that account's name in the panel's language
 
     @property
     def has_error(self) -> bool:
@@ -115,9 +121,23 @@ def build_view(
     conn: sqlite3.Connection,
     mine_only: bool = True,
     now: int | None = None,
+    account_filter: bool = True,
 ) -> View:
+    """The view every renderer draws.
+
+    `account_filter` applies the stored account omission (accounts.py) — read
+    here rather than passed in by each renderer, for the same reason the mute
+    is: two surfaces that have to remember to ask the same question end up
+    disagreeing, and the one that forgot is the one on screen. A caller looking
+    up a session it can already name (`cli._find_row`) passes False: an omitted
+    account hides rows from the list, it does not make them unaddressable.
+    """
     now = now or dbm.now_ms()
     view = View()
+    omit = accounts.effective(conn, config) if account_filter else None
+    if omit is not None:
+        view.omitted_account = omit
+        view.omitted_label = accounts.label(omit, config.settings.locale)
 
     last = dbm.kv_get(conn, "last_collect_at")
     view.last_collect_ms = int(last) if last else None
@@ -135,6 +155,10 @@ def build_view(
     stale_targets: set[str] = set()
     for t in config.enabled_targets():
         if mine_only and not t.mine:
+            continue
+        if omit is not None and t.account == omit:
+            # the whole target drops out: its sessions, its services and its
+            # health line all belong to the account being omitted
             continue
         wanted[t.id] = t
         st = status_by_target.get(t.id)
@@ -187,7 +211,7 @@ def build_view(
             )
             key = (t.id, label)
             line = service_agg.setdefault(
-                key, ServiceLine(t.id, t.label, label, 0, 0)
+                key, ServiceLine(t.id, t.label, t.account, label, 0, 0)
             )
             line.active += 1
             if eff == BLOCKED:
@@ -273,12 +297,17 @@ def build_view(
     # PRA HOJE when overdue, open by starting Claude Code in their folder
     from .tasks import open_tasks
     labels = {t.id: t.label for t in config.enabled_targets()}
-    accounts = {t.id: t.account for t in config.enabled_targets()}
+    # not `accounts`: that name is the module this function reads the filter from
+    account_of = {t.id: t.account for t in config.enabled_targets()}
     for tk in open_tasks(conn):
+        if tk["target_id"] and tk["target_id"] not in wanted:
+            # a task already tied to a folder lives in that target's account;
+            # an unresolved one (no target yet) belongs to no account and stays
+            continue
         row = Row(
             target_id=tk["target_id"] or "",
             target_label=labels.get(tk["target_id"], "?") if tk["target_id"] else "?",
-            target_account=accounts.get(tk["target_id"], "") if tk["target_id"] else "",
+            target_account=account_of.get(tk["target_id"], "") if tk["target_id"] else "",
             session_id=f"task:{tk['id']}",
             display_name=tk["text"],
             eff_state="task",
@@ -390,6 +419,10 @@ def badge(view: View) -> tuple[str, str]:
     if view.notify_muted:
         # a muted panel must not read as a quiet one (SPEC §7.3)
         parts.append("🔕")
+    if view.omitted_account is not None:
+        # same rule as the mute: a FILTERED panel must not read as a quiet one.
+        # Severity is untouched — omitting an account is a choice, not a fault.
+        parts.append(f"⊘ {view.omitted_label}")
     return "  ".join(parts), severity
 
 

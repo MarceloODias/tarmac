@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import accounts
 from . import db as dbm
 from . import notify as notifier
 from .config import Config, Target, tarmac_home
@@ -506,12 +507,17 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False,
     # Decided once, before the transaction: a mute that expires mid-cycle must
     # not make half the sessions notify and the other half not.
     notify_on = config.settings.notify and not notifier.is_muted(conn)
+    # An omitted account is silent too (DECISIONS #42): a banner about a row the
+    # panel is hiding is an alert you cannot act on. Read once, same reason.
+    omitted = accounts.effective(conn, config)
     events: list[notifier.BlockedEvent] = []
     with conn:
         _step(conn, "expire", lambda: notifier.collect_expired(conn))
         for r in results:
+            notify_target = notify_on and r.target.account != omitted
             ev, err = _guarded(
-                conn, "apply", lambda r=r: apply_result(conn, r, notify=notify_on)
+                conn, "apply", lambda r=r, n=notify_target: apply_result(
+                    conn, r, notify=n)
             )
             if err is None:
                 events.extend(ev or [])

@@ -196,3 +196,97 @@ def test_hook_install_preserves_other_settings(cli, tmp_path):
     assert "Stop" not in data["hooks"]
     assert "Notification" not in data["hooks"]
     assert "SessionStart" in data["hooks"]
+
+
+@pytest.fixture
+def cli_two_accounts(tmp_path):
+    """The same fake `claude` behind two config dirs: one machine, two accounts.
+
+    A separate fixture from `cli` on purpose — `tarmac account` has nothing to
+    do on a single-account setup, and that case is covered in
+    tests/test_account_filter.py.
+    """
+    home = tmp_path / "tarmac-home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin2"
+    fake_bin.mkdir()
+    # each account answers with its own session, so the panel can be told apart
+    (fake_bin / "claude").write_text("""#!/bin/bash
+case "$*" in *"agents --json"*)
+  if [ "$CLAUDE_CONFIG_DIR" = "$HOME/.claude-personal" ]; then
+    id=pers0001; nome=sessao-pessoal
+  else
+    id=work0001; nome=sessao-de-trabalho
+  fi
+  echo "[{\\"id\\":\\"$id\\",\\"kind\\":\\"background\\",\\"state\\":\\"blocked\\",\\"cwd\\":\\"/proj\\",\\"name\\":\\"$nome\\",\\"startedAt\\":1}]"
+;; *) echo fake ;; esac
+""")
+    (fake_bin / "claude").chmod(0o755)
+    targets = home / "targets.yaml"
+    targets.write_text(
+        "settings:\n  locale: en\ntargets:\n"
+        f"  - id: mac\n    label: Mac\n    mine: true\n    transport: local\n"
+        f"    claude_bin: {fake_bin / 'claude'}\n    config_dir: ~/.claude\n"
+        f"  - id: mac-personal\n    label: Mac\n    account: Personal\n"
+        f"    mine: true\n    transport: local\n"
+        f"    claude_bin: {fake_bin / 'claude'}\n"
+        f"    config_dir: ~/.claude-personal\n"
+    )
+
+    def run(*args, expect_ok=True):
+        (tmp_path / "fakehome2").mkdir(exist_ok=True)
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(tmp_path / "fakehome2"),
+            "TARMAC_HOME": str(home),
+            "TARMAC_TARGETS": str(targets),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-m", "tarmac.cli", *args],
+            capture_output=True, text=True, cwd=REPO, env=env, timeout=90,
+        )
+        if expect_ok:
+            assert proc.returncode == 0, (
+                f"`tarmac {' '.join(args)}` falhou ({proc.returncode})\n"
+                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+            )
+        return proc
+
+    return run
+
+
+def test_account_omits_one_account_from_both_renderers(cli_two_accounts):
+    cli = cli_two_accounts
+    assert cli("collect", "--force").stdout.count(": ok") == 2
+    menu = cli("render", "--format", "swiftbar").stdout
+    assert "sessao-de-trabalho" in menu and "sessao-pessoal" in menu
+
+    out = cli("account", "Personal").stdout
+    assert "Omitting Personal" in out
+    assert "⊘ Personal" in out            # and the listing marks which one
+
+    menu = cli("render", "--format", "swiftbar").stdout
+    assert "sessao-pessoal" not in menu, "the omitted account still rendered"
+    assert "sessao-de-trabalho" in menu
+    assert "⊘ Personal" in menu.splitlines()[0], "the badge hid the filter"
+    once = cli("render", "--format", "tui", "--once").stdout
+    assert "sessao-pessoal" not in once and "sessao-de-trabalho" in once
+
+    # a hidden session is still addressable by name (SwiftBar click, scripts)
+    assert cli("pin", "mac-personal", "pers0001").returncode == 0
+
+    assert "Showing all accounts" in cli("account", "all").stdout
+    assert "sessao-pessoal" in cli("render", "--format", "swiftbar").stdout
+
+
+def test_account_next_cycles_and_a_bad_name_fails_loudly(cli_two_accounts):
+    cli = cli_two_accounts
+    cli("collect", "--force")
+    assert "Omitting Personal" in cli("account", "next").stdout
+    assert "Omitting Professional" in cli("account", "next").stdout
+    assert "Showing all accounts" in cli("account", "next").stdout
+    assert "Showing all accounts" in cli("account").stdout   # status only
+
+    bad = cli("account", "Freelance", expect_ok=False)
+    assert bad.returncode != 0
+    assert "unknown account" in (bad.stdout + bad.stderr)

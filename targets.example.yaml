@@ -33,7 +33,8 @@ targets:
     config_dir: ~/.claude
 
   # Same machine, alternate account = separate target. `account` is shown as
-  # its own column (blank for the default one), so `label` stays the machine:
+  # its own column (blank for the default one), so `label` stays the machine.
+  # It is also what `A` in the panel (or `tarmac account`) omits from the list:
   # - id: mac-local-alt
   #   label: "Mac"
   #   account: "Personal"

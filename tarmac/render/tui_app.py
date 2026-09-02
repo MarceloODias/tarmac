@@ -3,7 +3,7 @@ revised by Marcelo: interactive now).
 
 Keys: ↑/↓ navigate · Enter open-or-focus the session's iTerm tab · c copy
 resume · p pin · m reminder · a defer · l logs · x resolve · S stop ·
-r respawn · u refresh · q quit.
+r respawn · A omit one account · u refresh · q quit.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .. import actions
+from .. import accounts, actions
 from ..collect import collect, collect_if_stale
 from ..config import Config, Target, load_config, targets_path
 from ..db import connect
@@ -162,6 +162,7 @@ class TarmacApp(App):
         Binding("r", "respawn", "bind_respawn"),
         Binding("R", "remove", "bind_remove"),
         Binding("N", "notify_toggle", "bind_notify"),
+        Binding("A", "account_omit", "bind_account"),
         Binding("u", "refresh", "bind_refresh"),
         Binding("q", "quit", "bind_quit"),
     ]
@@ -710,6 +711,26 @@ class TarmacApp(App):
         self.notify(self._t("notify_state_off" if muted else "notify_state_on"))
         view = build_view(self.config, self.conn)
         self._render(view)
+
+    def action_account_omit(self) -> None:
+        """`A`: cycle which account is left out of the list.
+
+        Two accounts on one machine are two targets (SPEC §3), and the merge is
+        wrong for whole stretches of the day: during work the personal
+        account's sessions are noise in the one list that says what is waiting
+        on me. Show all → omit each account in turn → show all.
+
+        Synchronous, like `N`: it is a single kv write, and the list has to
+        redraw in the same frame or the key looks like it did nothing. The
+        choice is stored, so it survives closing the panel."""
+        if not accounts.can_omit(self.config):
+            self.notify(self._t("account_only_one"), severity="warning")
+            return
+        omit = accounts.cycle(self.conn, self.config)
+        self.notify(self._t("account_showing_all") if omit is None
+                    else self._t("account_omitting",
+                                 account=accounts.label(omit, self.config.settings.locale)))
+        self._render(build_view(self.config, self.conn))
 
     def action_refresh(self) -> None:
         def work():

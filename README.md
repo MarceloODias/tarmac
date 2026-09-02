@@ -35,6 +35,8 @@ What `tarmac` still adds:
   tabs on the same session
 - **alerts that survive a closed panel**: a `Notification` hook pushes into the
   panel the moment a session starts waiting
+- **one account at a time, when you want it**: `A` leaves the personal
+  account out of the list (badge included) without touching the work one
 
 It does **not** orchestrate agents, render transcripts, manage worktrees, or
 schedule execution (Claude Code has native scheduled tasks for that).
@@ -97,6 +99,7 @@ for an Automation permission, once per host app (Terminal, SwiftBar, …).
 | `tarmac daemon [target]` | `claude daemon status` per target — is the supervisor alive? |
 | `tarmac gc-tabs` | close tabs of no-longer-blocked sessions (never automatic) |
 | `tarmac notify [on\|off\|mute 1h\|test]` | macOS alert when a session starts needing you |
+| `tarmac account [Personal\|default\|all\|next]` | leave one account out of the list (`A` in the panel) |
 | `tarmac hook [status\|install\|uninstall]` | the two Claude Code hooks below (neither costs a token) |
 
 ## The two hooks
@@ -140,6 +143,12 @@ remote host — that one you have to remove yourself).
 - `agent_needs_input` (the type that covers background sessions) only fires
   while `claude agents` is open in a terminal — that is Claude Code's rule, not
   ours. `permission_prompt` has no such condition.
+- `A` omits exactly **one** account from the list at a time (`⊘ <account>` in
+  the badge while it is on, and the badge stops counting what the list stops
+  showing). An omitted account is also silent — a banner about a row the panel
+  is hiding is an alert you cannot act on — so to hide nothing and still be
+  quiet, use `N` instead. Actions still reach a hidden session by name:
+  `tarmac open`, a SwiftBar click and scripts ignore the filter.
 - Session aliases are local to the panel; `claude --resume <alias>` won't
   resolve them (resume always uses the UUID).
 - The panel can't answer a blocked session: `claude agents` does that natively

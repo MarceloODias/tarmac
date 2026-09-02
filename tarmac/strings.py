@@ -99,6 +99,15 @@ STRINGS = {
         "notify_mute_eod": "Mute until end of day",
         "notify_unsupported": "notifications need macOS — nothing will be sent here",
         "bind_notify": "mute alerts",
+        # account filter (`A`): one account at a time can be omitted
+        "account_default": "Professional",
+        "account_all": "all accounts",
+        "account_omitting": "Omitting {account}",
+        "account_showing_all": "Showing all accounts",
+        "account_only_one": "only one account here — nothing to omit",
+        "account_omit": "Omit {account}",
+        "account_show_all": "Show all accounts",
+        "bind_account": "account",
         # actions
         "no_attach_id": "session without short_id and without uuid — nothing to attach",
         "no_resume_id": "session without uuid — no resume command",
@@ -216,6 +225,15 @@ STRINGS = {
         "notify_mute_eod": "Silenciar até o fim do dia",
         "notify_unsupported": "notificações exigem macOS — nada será enviado aqui",
         "bind_notify": "silenciar",
+        # account filter (`A`): one account at a time can be omitted
+        "account_default": "Profissional",
+        "account_all": "todas as contas",
+        "account_omitting": "Omitindo {account}",
+        "account_showing_all": "Mostrando todas as contas",
+        "account_only_one": "só há uma conta aqui — nada a omitir",
+        "account_omit": "Omitir {account}",
+        "account_show_all": "Mostrar todas as contas",
+        "bind_account": "conta",
         # actions
         "no_attach_id": "sessão sem short_id e sem uuid — nada para anexar",
         "no_resume_id": "sessão sem uuid — não há comando de resume",

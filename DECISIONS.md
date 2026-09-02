@@ -315,6 +315,59 @@ código nosso que só era complicado porque o CLI não dava suporte. O schema do
     ignorar o mute, `install` deixar o hook antigo de `SessionEnd` para trás, e
     o hook de `next_step` voltar a chamar `claude`.
 
+## Omitir uma conta da lista (`A`, 2026-09-02)
+
+Pedido do Marcelo: "um jeito de omitir a lista de uma conta (Pessoal/
+Profissional)", com atalho de teclado.
+
+42. **Uma conta por vez sai da lista, e a escolha fica guardada.** Duas contas
+    na mesma máquina são dois targets (§3) e o painel as junta de propósito —
+    mas essa junção está errada em faixas inteiras do dia: durante o trabalho
+    as sessões da conta pessoal são ruído na única lista cujo trabalho é dizer
+    o que espera por mim. `A` cicla: mostrar tudo → omitir cada conta → tudo,
+    e a conta omitida vai para o `kv` (o painel fica dias aberto; filtro que
+    eu tenho que reaplicar depois de cada restart é filtro em que eu paro de
+    confiar). Também há `tarmac account [Personal|default|all|next]` e um item
+    no menu do SwiftBar, os dois lendo e escrevendo o mesmo estado.
+
+    Quatro escolhas que valem mais que o filtro em si:
+
+    - **Uma conta, não um conjunto.** O caso é "agora não quero ver a pessoal",
+      não construir consultas. Com duas contas, omitir uma é mostrar a outra —
+      e a ciclagem começa pela conta *nomeada*, nunca pela default: o primeiro
+      toque tem que esconder o projeto paralelo, não o trabalho para o qual o
+      painel existe.
+    - **O badge para de CONTAR o que a lista para de mostrar.** O filtro mora
+      no `build_view`, não no renderizador. Um painel que anuncia `⏸ 2` e lista
+      uma linha é um painel que mente, e o badge é a manchete (§7.1).
+    - **Painel filtrado nunca pode parecer painel quieto.** Mesma regra que o
+      mute paga com 🔕: o badge ganha `⊘ <conta>` enquanto houver conta
+      omitida, e a severidade não muda — omitir é escolha, não falha. Uma
+      conta que saiu do config (target renomeado, desabilitado) deixa de
+      filtrar *e* de aparecer no badge: marcador sem efeito também é mentira.
+    - **A conta omitida fica muda.** Um alerta do macOS sobre uma linha que o
+      painel está escondendo é um alerta que você não consegue atender, então
+      o `collect` não notifica por ela (nem queima o claim: a sessão continua
+      `blocked` quando a conta voltar). O que se perde, dito na cara: não dá
+      para "esconder a pessoal mas continuar sendo avisado" — para isso, mostre
+      tudo e silencie com `N`.
+
+    A conta default é `account: ""` no `targets.yaml`, e "" é um valor de
+    verdade aqui: omitir a default é um estado diferente de não omitir nada
+    (`kv_get` devolve `None` só quando a linha não existe — é isso que torna a
+    default selecionável). Na tela ela aparece com uma palavra do `strings.py`
+    ("Professional"/"Profissional"), porque no config ela não tem nome.
+
+    Esconder da lista **não** é esconder do resto: `cli._find_row` passa
+    `account_filter=False`, então um clique no SwiftBar, um `tarmac open` ou um
+    script continuam alcançando a sessão pelo nome.
+
+    Teste de mutação (10 mutantes, 10 mortos): badge sem o `⊘`, filtro só no
+    renderizador (badge continua contando), `""` colapsando para `None`,
+    escolha não persistida, ciclo começando pela conta default, conta fantasma
+    seguindo "filtrando", conta omitida voltando a alertar, tecla `A` removida,
+    `A` roubando o `a` do adiar, e `_find_row` passando a filtrar também.
+
 ## Fora do escopo desta entrega (deliberado)
 
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.
