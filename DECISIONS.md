@@ -156,10 +156,226 @@ fix de propósito e confirmo que a suíte falha. Foi assim que descobri que minh
 primeira hipótese sobre o crash do `logs` estava errada (a suíte passava com o
 bug reintroduzido), o que me levou à causa real.
 
+### O painel congelado (24/08/2026)
+
+Você viu duas sessões em TRABALHANDO: uma estava ociosa e a outra esperando por
+você. O painel não estava errado, estava **parado** — mostrando o frame das
+22:46 do dia anterior, com os cinco targets marcados `ok`.
+
+29. **Migrações versionadas** (`db.SCHEMA_VERSION` + `db.MIGRATIONS`). A causa
+    raiz: a `notifications` da §7.3 nasceu com `CREATE TABLE IF NOT EXISTS`, e o
+    banco do Marcelo já tinha uma tabela com esse nome, de um rascunho da mesma
+    feature chaveado em `blocked_at` (nunca commitado). O `IF NOT EXISTS` viu o
+    nome e não fez nada; todo collect a partir dali morria em `no column named
+    transition_id`. `IF NOT EXISTS` constrói banco novo e é **cego para tabela
+    existente com forma errada** — então drift agora é consertado explicitamente,
+    e a etapa 1 só dropa a tabela se ela estiver drifted: uma correta guarda
+    claims vivos, e jogá-los fora re-anunciaria sessões já anunciadas.
+30. **Um passo que estoura não derruba o ciclo** (`collect._guarded`). O ciclo
+    escreve várias coisas independentes sob uma transação só; qualquer uma
+    estourando descartava tudo e escapava do processo. Agora cada passo tem seu
+    savepoint. E `collect_target` não levanta mais: `pool.map` reergue no
+    chamador, então uma surpresa em um target levava os outros junto.
+31. **Falha interna é falha do target** (`collect.record_failure`). O crash
+    acontecia *antes* do código que registra erro, então `error_kind` ficava
+    NULL para sempre — foi isso que fez um painel quebrado parecer saudável.
+    Passos sem target a quem atribuir (mute, next_step, prune) gravam o erro em
+    `kv:last_error:<passo>`: não param o ciclo, mas também não somem.
+32. **Dado tem idade, independente de erro** (`settings.stale_data_after_s`,
+    estado `stale`). Esta é a defesa que **não depende do caminho de falha
+    funcionar**: passou de 5 min sem leitura, o target vira ⏳ e o badge também.
+    "Nada espera por você" e "nada esperava da última vez que consegui olhar"
+    não podem mais renderizar igual.
+
+Os quatro consertos passaram por teste de mutação: 11 mutantes, 11 mortos.
+
+## Hook de `next_step` invadia a sessão que resumia (2026-08-25)
+
+33. **`--fork-session` no resume do hook.** `claude -p --resume <id>` sem fork
+    grava no transcript da própria sessão do usuário. Três sintomas, um só
+    causa, todos vistos nos transcripts: (a) a pergunta aparece como prompt do
+    usuário — em sessão viva ela entra como `queue-operation`, parecendo que o
+    Claude não respondeu; (b) o último turno de assistente fica com o modelo
+    barato, então reabrir a sessão volta em **Haiku**; (c) o turno extra faz o
+    coletor ver a sessão em `working` e `clear_auto_next_step` **apaga a nota
+    recém-gravada** (foi o que aconteceu com `29de4467` e `607e51cc`). Com
+    `--fork-session` a resposta sai de um id descartável, o arquivo original
+    não é tocado e o fork não aparece em `claude agents --json` (verificado),
+    logo não polui o painel.
+34. **A pergunta segue `settings.locale`.** Estava fixa em português dentro do
+    shell, num painel em inglês. As duas versões passaram para
+    `tarmac/strings.py` (`next_step_prompt`, como todo texto novo) e viajam em
+    `TARMAC_NEXTSTEP_PROMPT`; o default do script, para hooks instalados à mão
+    em host remoto, é o inglês.
+35. **`tarmac hook install` só funcionava dentro do checkout.** O script era
+    procurado em `../hooks/` relativo ao pacote, que não existe no wheel: pelo
+    binário instalado o comando morria com `FileNotFoundError` — ou seja, o
+    painel nunca conseguia atualizar o próprio hook. O `pyproject` agora
+    `force-include`-a o script como `tarmac/hooks/`, e `hook_source()` aceita
+    as duas origens.
+
+    Teste de mutação: tirar `--fork-session` e voltar a pergunta para português
+    mata os testes novos (2 mutantes, 2 mortos).
+
+## O changelog do Claude Code alcançou o painel (2026-08-28)
+
+Releitura do changelog (v2.1.226 → v2.1.251, a versão instalada) procurando
+código nosso que só era complicado porque o CLI não dava suporte. O schema do
+`agents --json` **não mudou** (conferido rodando o comando: mesmos campos que
+`model.py` parseia). O que mudou foi o que dá para deletar.
+
+36. **`next_step` sai do texto que a sessão já respondeu — o hook não gasta
+    mais nada.** O evento `Stop` entrega `last_assistant_message` (o texto da
+    resposta que acabou) no stdin do hook. Não existe mais motivo para
+    `claude -p --resume`, que era o que continuava a sessão e reacendia o
+    próprio hook (#26). Com a chamada de API foram embora as três travas que
+    existiam só por causa dela: `TARMAC_HOOK_GUARD`, o arquivo de dedupe e o
+    teto diário — mais o lock que só existia porque dedupe e teto são
+    read-modify-write. O script caiu de 190 para ~120 linhas, das quais metade
+    é comentário, e `hooks/session-end-next-step.sh` foi apagado.
+
+    O que se perde, dito na cara: a nota deixou de ser um resumo escrito por um
+    modelo e passou a ser **a própria frase da sessão**, condensada (markdown e
+    blocos de código fora) e cortada em 200 caracteres. Não escolhi manter as
+    duas versões. O resumo pago era mais bem-acabado, mas podia estar errado —
+    e esta coluna é lida como fato ("next_step que não mente"). Uma citação
+    truncada erra menos que um resumo alucinado, e agora a nota é reescrita a
+    cada turno em vez de só no fim da sessão. Se a qualidade incomodar, o
+    caminho de volta é um hook de `SessionEnd` alimentado por essa mesma frase
+    (sem `--resume`, input de uma linha) — não o que estava lá.
+
+    As duas listas de cwd (`TARMAC_NEXTSTEP_ONLY` / `_EXCLUDE`) ficaram. Não
+    são mais controle de custo: são ruído e privacidade — o texto da nota vai
+    parar no banco do painel.
+
+37. **O alerta virou push (hook `Notification`), e o hook não decide nada.**
+    Era o buraco admitido no README: "só dispara enquanto o painel está
+    rodando", e mesmo rodando podia demorar até 60s. O Claude Code dispara
+    `Notification` quando uma sessão precisa de gente — `permission_prompt` uns
+    6s depois do prompt aparecer, **adiado a cada tecla digitada**, ou seja
+    exatamente quando você não está lá.
+
+    A decisão de projeto: o hook **não** manda notificar. Ele chama
+    `tarmac poke`, que é um `collect` só dos targets locais. Quem decide
+    continua sendo o ciclo normal — o claim por linha de `transitions`, o mute,
+    o filtro de `service`/`mine`. Consequência: um hook que dispara duas vezes,
+    ou dispara para algo que o painel não anunciaria, produz exatamente os
+    alertas que o ciclo de 60s produziria. A alternativa (o hook lendo o
+    payload e mandando o alerta) teria uma segunda fonte de verdade sobre o
+    estado da sessão, contra a §2.
+
+    Detalhes que valem a leitura:
+    - `local_only`: um target ssh tem 15s de timeout e não pode entrar num
+      caminho que precisa alertar em segundos. Targets remotos seguem no ciclo.
+    - dois pokes, 3s de intervalo: `agent_needs_input` dispara no instante em
+      que a sessão passa a esperar e pode chegar antes de a listagem mudar. O
+      segundo poke fecha essa janela; o claim faz ele ser mudo quando o
+      primeiro já avisou.
+    - `idle_prompt` fica de fora do matcher de propósito: dispara 60s depois de
+      **todo** turno de **toda** sessão, e sessão ociosa não está bloqueada.
+    - o hook roda destacado (`&`) e sai em 0 — hook nenhum segura a sessão que
+      o disparou.
+    - `TARMAC_BIN` absoluto no comando instalado: hook não roda com PATH de
+      shell de login, e um binário perdido no PATH já custou uma vez o painel
+      inteiro em `(stale)`.
+    - primeira coleta de um target continua muda (`cold_start`): logo depois de
+      instalar, num banco novo, o primeiro poke não alerta. É a mesma regra que
+      impede rajada em instalação nova.
+
+38. **`claude respawn` virou ação do painel (tecla `r`).** A linha que motiva:
+    sessão background que parou de responder (host morreu, máquina dormiu no
+    meio da resposta). Antes só existiam `S` (parar) e `R` (tirar da lista) —
+    as duas jogam o trabalho fora. `r` reinicia o processo e a conversa
+    continua de onde parou. Pede confirmação: mora ao lado de `R`, e só uma das
+    duas é reversível.
+
+39. **`tarmac daemon`**: `claude daemon status` por target. Existe para separar
+    "não enxergo a máquina" de "o supervisor morreu" — no segundo caso o
+    `agents --json` continua respondendo, a partir do estado em disco, e todas
+    as linhas parecem saudáveis enquanto nada responde.
+
+40. **`waitingFor` agora tem vocabulário documentado** (`permission prompt`,
+    `input needed`, `sandbox request`, `worker request`, `dialog open`). Os
+    cinco ganharam tradução em `strings.py`; **valor desconhecido continua
+    aparecendo cru**, e não virou `blocked` genérico: o campo é vocabulário do
+    CLI, não nosso, e um valor novo é notícia — apagá-lo jogaria fora a única
+    coisa que a linha diz sobre o que ela espera.
+
+41. **Duas defesas nossas ficaram menos críticas (v2.1.248), e nada foi
+    removido por causa disso.** (a) Sessão background morta há mais de 48h
+    agora aparece como `stopped` em vez de ficar eternamente `blocked` —
+    aquelas eram as linhas que inflavam o "maior tempo de espera", que é a
+    manchete do painel. (b) Abrir uma sessão já aberta em outro terminal passou
+    a ser recusado pelo próprio CLI, então um `terminal_handles` obsoleto não
+    consegue mais criar dois processos na mesma conversa. As duas continuam
+    valendo como ergonomia; o que mudou é que deixaram de ser a única barreira.
+
+    Teste de mutação (6 mutantes, 6 mortos): varrer target ssh no poke, hook
+    aceitar qualquer tipo de notificação, hook parar de rodar destacado, poke
+    ignorar o mute, `install` deixar o hook antigo de `SessionEnd` para trás, e
+    o hook de `next_step` voltar a chamar `claude`.
+
+## Omitir uma conta da lista (`A`, 2026-09-02)
+
+Pedido do Marcelo: "um jeito de omitir a lista de uma conta (Pessoal/
+Profissional)", com atalho de teclado.
+
+42. **Uma conta por vez sai da lista, e a escolha fica guardada.** Duas contas
+    na mesma máquina são dois targets (§3) e o painel as junta de propósito —
+    mas essa junção está errada em faixas inteiras do dia: durante o trabalho
+    as sessões da conta pessoal são ruído na única lista cujo trabalho é dizer
+    o que espera por mim. `A` cicla: mostrar tudo → omitir cada conta → tudo,
+    e a conta omitida vai para o `kv` (o painel fica dias aberto; filtro que
+    eu tenho que reaplicar depois de cada restart é filtro em que eu paro de
+    confiar). Também há `tarmac account [Personal|default|all|next]` e um item
+    no menu do SwiftBar, os dois lendo e escrevendo o mesmo estado.
+
+    Quatro escolhas que valem mais que o filtro em si:
+
+    - **Uma conta, não um conjunto.** O caso é "agora não quero ver a pessoal",
+      não construir consultas. Com duas contas, omitir uma é mostrar a outra —
+      e a ciclagem começa pela conta *nomeada*, nunca pela default: o primeiro
+      toque tem que esconder o projeto paralelo, não o trabalho para o qual o
+      painel existe.
+    - **O badge para de CONTAR o que a lista para de mostrar.** O filtro mora
+      no `build_view`, não no renderizador. Um painel que anuncia `⏸ 2` e lista
+      uma linha é um painel que mente, e o badge é a manchete (§7.1).
+    - **Painel filtrado nunca pode parecer painel quieto.** Mesma regra que o
+      mute paga com 🔕: o badge ganha `⊘ <conta>` enquanto houver conta
+      omitida, e a severidade não muda — omitir é escolha, não falha. Uma
+      conta que saiu do config (target renomeado, desabilitado) deixa de
+      filtrar *e* de aparecer no badge: marcador sem efeito também é mentira.
+    - **A conta omitida fica muda.** Um alerta do macOS sobre uma linha que o
+      painel está escondendo é um alerta que você não consegue atender, então
+      o `collect` não notifica por ela (nem queima o claim: a sessão continua
+      `blocked` quando a conta voltar). O que se perde, dito na cara: não dá
+      para "esconder a pessoal mas continuar sendo avisado" — para isso, mostre
+      tudo e silencie com `N`.
+
+    A conta default é `account: ""` no `targets.yaml`, e "" é um valor de
+    verdade aqui: omitir a default é um estado diferente de não omitir nada
+    (`kv_get` devolve `None` só quando a linha não existe — é isso que torna a
+    default selecionável). Na tela ela aparece com uma palavra do `strings.py`
+    ("Professional"/"Profissional"), porque no config ela não tem nome.
+
+    Esconder da lista **não** é esconder do resto: `cli._find_row` passa
+    `account_filter=False`, então um clique no SwiftBar, um `tarmac open` ou um
+    script continuam alcançando a sessão pelo nome.
+
+    Teste de mutação (10 mutantes, 10 mortos): badge sem o `⊘`, filtro só no
+    renderizador (badge continua contando), `""` colapsando para `None`,
+    escolha não persistida, ciclo começando pela conta default, conta fantasma
+    seguindo "filtrando", conta omitida voltando a alertar, tecla `A` removida,
+    `A` roubando o `a` do adiar, e `_find_row` passando a filtrar também.
+
 ## Fora do escopo desta entrega (deliberado)
 
 - Resposta inline (§9.0.2): morta pelo FINDINGS E — não implementada.
 - `Fechar abas resolvidas` existe como `tarmac gc-tabs` (nunca automático).
-- Notificações: nenhuma, por decisão fechada da §7.
+- Notificações: a §7 as proibia; Marcelo reabriu em 23/08/2026 e a §7.3 é o
+  resultado — alerta do macOS **na transição** para `blocked`, com claim por
+  linha de `transitions` (nunca duas vezes), sem rajada em banco novo, e mute
+  com prazo para reunião. O hook `Notification` entrou em 28/08/2026 (#37); o
+  que continua fora é re-alerta por escalada (>30min parado não avisa de novo).
 - Adaptadores de terminal além do iTerm2: degradação para clipboard já existe;
   Terminal.app/Ghostty/etc. ficam para a generalização pública (§15.2).

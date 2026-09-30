@@ -3,7 +3,7 @@ revised by Marcelo: interactive now).
 
 Keys: ↑/↓ navigate · Enter open-or-focus the session's iTerm tab · c copy
 resume · p pin · m reminder · a defer · l logs · x resolve · S stop ·
-u refresh · q quit.
+r respawn · A omit one account · u refresh · q quit.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from .. import actions
+from .. import accounts, actions
 from ..collect import collect, collect_if_stale
 from ..config import Config, Target, load_config, targets_path
 from ..db import connect
@@ -159,7 +159,10 @@ class TarmacApp(App):
         Binding("l", "logs", "bind_logs"),
         Binding("x", "resolve", "bind_resolve"),
         Binding("S", "stop", "bind_stop"),
+        Binding("r", "respawn", "bind_respawn"),
         Binding("R", "remove", "bind_remove"),
+        Binding("N", "notify_toggle", "bind_notify"),
+        Binding("A", "account_omit", "bind_account"),
         Binding("u", "refresh", "bind_refresh"),
         Binding("q", "quit", "bind_quit"),
     ]
@@ -280,6 +283,9 @@ class TarmacApp(App):
                 extra += f"   [dim]{tl.label} {tr(locale, 'offline_for', ago=format_duration(tl.age_s or 0))}[/dim]"
             elif tl.state == "error":
                 extra += f"   [red]⚠ {tl.label}[/red]"
+            elif tl.state == "stale":
+                extra += (f"   [yellow]⏳ {tl.label} "
+                          f"{tr(locale, 'stale_for', ago=format_duration(tl.age_s or 0))}[/yellow]")
         badge_widget.update(
             f"[{BADGE_STYLE.get(severity, '')}]  {text}  [/]" + extra
         )
@@ -624,6 +630,39 @@ class TarmacApp(App):
             ConfirmPrompt(self._t("confirm_stop", name=row.display_name),
                           self._t("confirm_hint")), handle)
 
+    def action_respawn(self) -> None:
+        """`r`: restart the session's process (`claude respawn`).
+
+        The row this is for: a background session that stopped responding — its
+        host process died, or the machine slept mid-response. Before this the
+        only keys that reached such a row were S (stop) and R (remove from the
+        list), both of which throw the work away. Respawn keeps the
+        conversation and starts a process for it again.
+        """
+        cur = self._current()
+        if cur is None:
+            return
+        target, row = cur
+        if not row.short_id:
+            self.notify(self._t("no_short_id_respawn"), severity="warning")
+            return
+
+        def handle(confirmed: bool) -> None:
+            if not confirmed:
+                return
+
+            def work():
+                proc = actions.remote_claude(target, "respawn", row.short_id)
+                msg = (proc.stdout or proc.stderr).strip()
+                collect(self.config, connect(), force=True)
+                self.call_from_thread(self.notify, msg or self._t("respawned"))
+                self.call_from_thread(self.refresh_data)
+            self.run_worker(work, thread=True, group='actions')
+
+        self.push_screen(
+            ConfirmPrompt(self._t("confirm_respawn", name=row.display_name),
+                          self._t("confirm_hint")), handle)
+
     def action_remove(self) -> None:
         """`R`: drop a session from the agent view (`claude rm`).
 
@@ -659,6 +698,39 @@ class TarmacApp(App):
                     short_id=row.short_id),
             self._t("confirm_hint"),
         ), handle)
+
+    def action_notify_toggle(self) -> None:
+        """One keystroke to silence the alerts before a meeting (SPEC §7.3).
+
+        Synchronous and on this connection: it is a single kv write, and the
+        badge has to show 🔕 in the same frame or the panel looks like it
+        ignored the key. A timed mute is `tarmac notify mute 1h`.
+        """
+        from .. import notify as notifier
+        muted = notifier.toggle(self.conn)
+        self.notify(self._t("notify_state_off" if muted else "notify_state_on"))
+        view = build_view(self.config, self.conn)
+        self._render(view)
+
+    def action_account_omit(self) -> None:
+        """`A`: cycle which account is left out of the list.
+
+        Two accounts on one machine are two targets (SPEC §3), and the merge is
+        wrong for whole stretches of the day: during work the personal
+        account's sessions are noise in the one list that says what is waiting
+        on me. Show all → omit each account in turn → show all.
+
+        Synchronous, like `N`: it is a single kv write, and the list has to
+        redraw in the same frame or the key looks like it did nothing. The
+        choice is stored, so it survives closing the panel."""
+        if not accounts.can_omit(self.config):
+            self.notify(self._t("account_only_one"), severity="warning")
+            return
+        omit = accounts.cycle(self.conn, self.config)
+        self.notify(self._t("account_showing_all") if omit is None
+                    else self._t("account_omitting",
+                                 account=accounts.label(omit, self.config.settings.locale)))
+        self._render(build_view(self.config, self.conn))
 
     def action_refresh(self) -> None:
         def work():

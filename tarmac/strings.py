@@ -33,6 +33,7 @@ STRINGS = {
         "reschedule": "Reschedule…",
         "overdue_ago": "overdue {ago}",
         "offline_for": "offline for {ago}",
+        "stale_for": "not read for {ago}",
         "last_read": "last read {when}",
         "active": "active",
         "stuck": "stuck",
@@ -84,6 +85,29 @@ STRINGS = {
                           "uncommitted changes.\nTo restart it from scratch: "
                           "claude respawn {short_id}",
         "removed": "removed",
+        # notifications (SPEC §7.3)
+        "notify_title": "Needs you",
+        "notify_title_many": "{n} sessions need you",
+        "notify_body_default": "waiting for you",
+        "notify_state_on": "Notifications: on",
+        "notify_state_off": "Notifications: off",
+        "notify_state_until": "Notifications: muted until {when}",
+        "notify_muted_badge": "🔕",
+        "notify_mute": "Mute notifications",
+        "notify_unmute": "Unmute notifications",
+        "notify_mute_for": "Mute for {when}",
+        "notify_mute_eod": "Mute until end of day",
+        "notify_unsupported": "notifications need macOS — nothing will be sent here",
+        "bind_notify": "mute alerts",
+        # account filter (`A`): one account at a time can be omitted
+        "account_default": "Professional",
+        "account_all": "all accounts",
+        "account_omitting": "Omitting {account}",
+        "account_showing_all": "Showing all accounts",
+        "account_only_one": "only one account here — nothing to omit",
+        "account_omit": "Omit {account}",
+        "account_show_all": "Show all accounts",
+        "bind_account": "account",
         # actions
         "no_attach_id": "session without short_id and without uuid — nothing to attach",
         "no_resume_id": "session without uuid — no resume command",
@@ -92,6 +116,21 @@ STRINGS = {
         "focused": "focused",
         "iterm_copied": "iTerm2 unavailable ({msg}). Command copied to the clipboard: {cmd}",
         "iterm_manual": "iTerm2 unavailable ({msg}). Command to paste manually: {cmd}",
+        "confirm_respawn": "Restart the process of {name}?\n"
+                           "It picks the conversation up where it stopped.",
+        "respawned": "restarted",
+        "no_short_id_respawn": "session without short_id — respawn only exists "
+                               "for background sessions",
+        "bind_respawn": "respawn",
+        # `waitingFor`, as documented in the agent view reference. Unknown values
+        # render as they arrive: the field is the CLI's, not ours, and a value we
+        # have never seen is still worth showing.
+        "blocked_generic": "blocked",
+        "wf_permission prompt": "permission prompt",
+        "wf_input needed": "waiting for an answer",
+        "wf_sandbox request": "sandbox request",
+        "wf_worker request": "worker request",
+        "wf_dialog open": "dialog open",
     },
     "pt": {
         "for_today": "PRA HOJE",
@@ -120,6 +159,7 @@ STRINGS = {
         "reschedule": "Reagendar…",
         "overdue_ago": "venceu há {ago}",
         "offline_for": "offline há {ago}",
+        "stale_for": "sem leitura há {ago}",
         "last_read": "última leitura {when}",
         "active": "ativas",
         "stuck": "travada",
@@ -171,6 +211,29 @@ STRINGS = {
                           "alterações não commitadas.\nPara reiniciá-la do zero: "
                           "claude respawn {short_id}",
         "removed": "removido",
+        # notifications (SPEC §7.3)
+        "notify_title": "Precisa de você",
+        "notify_title_many": "{n} sessões precisam de você",
+        "notify_body_default": "esperando por você",
+        "notify_state_on": "Notificações: ligadas",
+        "notify_state_off": "Notificações: desligadas",
+        "notify_state_until": "Notificações: silenciadas até {when}",
+        "notify_muted_badge": "🔕",
+        "notify_mute": "Silenciar notificações",
+        "notify_unmute": "Religar notificações",
+        "notify_mute_for": "Silenciar por {when}",
+        "notify_mute_eod": "Silenciar até o fim do dia",
+        "notify_unsupported": "notificações exigem macOS — nada será enviado aqui",
+        "bind_notify": "silenciar",
+        # account filter (`A`): one account at a time can be omitted
+        "account_default": "Profissional",
+        "account_all": "todas as contas",
+        "account_omitting": "Omitindo {account}",
+        "account_showing_all": "Mostrando todas as contas",
+        "account_only_one": "só há uma conta aqui — nada a omitir",
+        "account_omit": "Omitir {account}",
+        "account_show_all": "Mostrar todas as contas",
+        "bind_account": "conta",
         # actions
         "no_attach_id": "sessão sem short_id e sem uuid — nada para anexar",
         "no_resume_id": "sessão sem uuid — não há comando de resume",
@@ -179,8 +242,34 @@ STRINGS = {
         "focused": "focado",
         "iterm_copied": "iTerm2 indisponível ({msg}). Comando copiado para o clipboard: {cmd}",
         "iterm_manual": "iTerm2 indisponível ({msg}). Comando para colar manualmente: {cmd}",
+        "confirm_respawn": "Reiniciar o processo de {name}?\n"
+                           "A conversa continua de onde parou.",
+        "respawned": "reiniciada",
+        "no_short_id_respawn": "sessão sem short_id — respawn só existe para "
+                               "sessões background",
+        "bind_respawn": "respawn",
+        "blocked_generic": "bloqueada",
+        "wf_permission prompt": "pedido de permissão",
+        "wf_input needed": "esperando resposta",
+        "wf_sandbox request": "pedido do sandbox",
+        "wf_worker request": "pedido do worker",
+        "wf_dialog open": "diálogo aberto",
     },
 }
+
+
+def waiting_label(locale: str, raw: str | None) -> str:
+    """`waitingFor` in the panel's language.
+
+    The five values the agent view documents get a translation; anything else
+    is shown verbatim. The JSON is a research preview and this field is its
+    vocabulary — a value we do not know is news, not an error, and hiding it
+    behind a generic 'blocked' would throw away the only thing the row says
+    about what it is waiting for.
+    """
+    if not raw:
+        return tr(locale, "blocked_generic")
+    return tr(locale, f"wf_{raw}") if f"wf_{raw}" in STRINGS["en"] else raw
 
 _locale = "en"
 

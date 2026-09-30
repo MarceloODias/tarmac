@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from . import accounts as accts
 from . import actions
 from . import db as dbm
 from .collect import collect, collect_if_stale
@@ -17,6 +18,11 @@ from .config import Config, load_config, tarmac_home
 from .dates import DateParseError, human_confirmation, parse_with_fallback
 from .derive import build_view
 from .strings import set_locale, t
+
+
+def _hook_keys() -> list[str]:
+    from .hookmgr import SPECS
+    return list(SPECS)
 
 
 def _require_target(config: Config, target_id: str):
@@ -27,7 +33,9 @@ def _require_target(config: Config, target_id: str):
 
 
 def _find_row(config: Config, conn, target_id: str, session_id: str):
-    view = build_view(config, conn, mine_only=False)
+    # account_filter=False: `A` hides an account from the LIST; a command that
+    # already names its target and session must still reach it (accounts.py)
+    view = build_view(config, conn, mine_only=False, account_filter=False)
     for bucket in (view.overdue, view.blocked, view.working, view.scheduled,
                    view.done, view.other):
         for row in bucket:
@@ -68,7 +76,14 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("stats", help="tempo agregado em blocked por dia (owned)")
 
-    for name in ("open", "logs", "stop", "rm", "copy-resume", "resolve", "pin"):
+    sub.add_parser("poke", help="coleta só os targets locais e alerta agora "
+                                "(o que o hook Notification chama)")
+
+    p = sub.add_parser("daemon", help="estado do supervisor de sessões background")
+    p.add_argument("target_id", nargs="?", help="um target só (default: todos)")
+
+    for name in ("open", "logs", "stop", "rm", "copy-resume", "resolve", "pin",
+                 "respawn"):
         p = sub.add_parser(name)
         p.add_argument("target_id")
         p.add_argument("session_id")
@@ -98,14 +113,27 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("gc-tabs", help="fecha abas resolvidas (SPEC §9.0.1)")
     p.add_argument("--idle-min", type=int, default=None)
 
-    p = sub.add_parser("hook", help="hook de next_step (custa API — off por padrão)")
+    p = sub.add_parser("hook", help="hooks do Claude Code (grátis, off por padrão)")
     p.add_argument("action", choices=["status", "install", "uninstall"])
-    p.add_argument("--exclude", default="", help="prefixos de cwd a ignorar (a:b)")
-    p.add_argument("--only", default="", help="rodar SÓ nestes prefixos de cwd (a:b)")
-    p.add_argument("--max-day", type=int, default=20, help="teto de chamadas por dia")
-    p.add_argument("--model", default="", help="modelo (default: haiku, barato)")
+    p.add_argument("--which", action="append", default=[],
+                   choices=sorted(_hook_keys()),
+                   help="qual hook (repetível; default: todos)")
+    p.add_argument("--exclude", default="", help="next-step: prefixos de cwd a ignorar (a:b)")
+    p.add_argument("--only", default="", help="next-step: rodar SÓ nestes prefixos (a:b)")
     p.add_argument("--config-dir", default="",
                    help="um CLAUDE_CONFIG_DIR só (default: todos os targets locais)")
+
+    p = sub.add_parser("notify", help="alerta do macOS em PRECISA DE VOCÊ (SPEC §7.3)")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["status", "on", "off", "toggle", "mute", "test"])
+    p.add_argument("when", nargs="*",
+                   help="mute: por quanto tempo (1h, 30min, 'fim do dia'); "
+                        "vazio = até religar")
+
+    p = sub.add_parser("account", help="omite uma conta da lista (`A` no painel)")
+    p.add_argument("which", nargs="?",
+                   help="conta a omitir (Personal, default…), 'all' para "
+                        "mostrar todas, 'next' para avançar; vazio = status")
 
     p = sub.add_parser("task", help="tarefa avulsa: 'no benji-dp, preciso …'")
     p.add_argument("text", nargs="*", help="descrição; vazio lista as abertas")
@@ -145,6 +173,33 @@ def main(argv: list[str] | None = None) -> None:
                 run_tui(config)
         return
 
+    if args.cmd == "poke":
+        # A Notification hook fired on this machine: a session started waiting.
+        # Read the LOCAL targets now (an ssh target's 15s timeout has no place
+        # in a path meant to alert in seconds) and let the ordinary claim decide
+        # what gets announced — the hook never decides anything (SPEC §7.3).
+        for r in collect(config, conn, force=True, local_only=True):
+            status = "ok" if r.sessions is not None else f"{r.error_kind}: {r.error}"
+            print(f"{r.target.id}: {status}")
+        return
+
+    if args.cmd == "daemon":
+        # `claude daemon status` tells apart "machine unreachable" from "the
+        # supervisor died": in the second case `agents --json` still answers,
+        # from state on disk, and every row looks fine while nothing responds.
+        targets = ([_require_target(config, args.target_id)] if args.target_id
+                   else config.enabled_targets())
+        for tg in targets:
+            try:
+                proc = actions.remote_claude(tg, "daemon", "status", timeout=20)
+                out = (proc.stdout or proc.stderr).strip() or f"exit {proc.returncode}"
+            except Exception as e:
+                out = f"{type(e).__name__}: {e}"
+            print(f"── {tg.label or tg.id}")
+            for line in out.splitlines():
+                print(f"   {line}")
+        return
+
     if args.cmd == "stats":
         rows = dbm.wasted_by_day(conn)
         if not rows:
@@ -167,31 +222,91 @@ def main(argv: list[str] | None = None) -> None:
         # machine never sees a hook installed in the other one
         config_dirs = ([args.config_dir] if args.config_dir
                        else hookmgr.local_config_dirs(config))
+        which = args.which or None
         if args.action == "status":
             for cfg in config_dirs:
-                installed, command = hookmgr.status(cfg)
-                print(f"{cfg}: instalado: {installed}")
-                if installed:
-                    print(f"  comando: {command}")
-            # dedupe/counter are machine-wide, shared by every config dir
-            seen = tarmac_home() / "next-steps.seen"
-            count = tarmac_home() / "next-steps.count"
-            if seen.exists():
-                print(f"sessões já resumidas: {len(seen.read_text().splitlines())}")
-            if count.exists():
-                print(f"contador do dia: {count.read_text().strip()}")
+                found = hookmgr.status(cfg)
+                for key in hookmgr.SPECS:
+                    print(f"{cfg}: {key}: instalado: {key in found}")
+                    if key in found:
+                        print(f"  comando: {found[key]}")
+                if "legacy" in found:
+                    print(f"{cfg}: ⚠ hook ANTIGO de SessionEnd ainda instalado "
+                          f"(gasta API a cada sessão encerrada): {found['legacy']}")
+                    print("  remova com: tarmac hook install  (ou hook uninstall)")
+            queue = tarmac_home() / "next-steps.jsonl"
+            if queue.exists() and queue.read_text().strip():
+                print(f"fila por drenar: {len(queue.read_text().splitlines())} linha(s)")
             return
         if args.action == "install":
             for cfg in config_dirs:
-                command = hookmgr.install(args.exclude, args.only, args.max_day,
-                                          args.model, config_dir=cfg)
-                print(f"{cfg}: instalado: {command}")
-            print("cada sessão encerrada gasta 1 chamada (transcript inteiro como "
-                  "input). Teto diário e dedupe por sessão estão ativos.")
+                for key, command in hookmgr.install(
+                        which, config_dir=cfg,
+                        exclude=args.exclude, only=args.only).items():
+                    print(f"{cfg}: {key}: {command}")
+            print("nenhum dos dois gasta API: o next-step vem do texto que a "
+                  "sessão já respondeu, e o needs-you só manda o painel coletar.")
+            if not hookmgr.tarmac_bin():
+                print("⚠ não achei o binário `tarmac` para gravar no hook — o "
+                      "needs-you vai depender do PATH da sessão.")
             return
         for cfg in config_dirs:
-            print(f"{cfg}: " + ("removido" if hookmgr.uninstall(cfg)
-                                else "não estava instalado"))
+            gone = hookmgr.uninstall(which, config_dir=cfg)
+            print(f"{cfg}: " + (", ".join(f"{k} removido" for k in gone)
+                                if gone else "não estava instalado"))
+        return
+
+    if args.cmd == "notify":
+        from . import notify as notifier
+        if args.action == "on":
+            notifier.unmute(conn)
+        elif args.action == "off":
+            notifier.mute(conn)
+        elif args.action == "toggle":
+            notifier.toggle(conn)
+        elif args.action == "mute":
+            if args.when:
+                try:
+                    until = parse_with_fallback(
+                        " ".join(args.when),
+                        default_hour=config.settings.default_hour,
+                        end_of_day_hour=config.settings.end_of_day_hour,
+                    )
+                except DateParseError as e:
+                    sys.exit(str(e))
+                notifier.mute(conn, int(until.timestamp() * 1000))
+            else:
+                notifier.mute(conn)
+        elif args.action == "test":
+            # also the way to make macOS show the permission prompt the first
+            # time: nothing is delivered until osascript is allowed to notify
+            ok = notifier.send(t("notify_title"), t("notify_body_default"),
+                               subtitle="tarmac", sound=config.settings.notify_sound)
+            print("enviada" if ok else "falhou (System Settings > Notifications)")
+        muted = notifier.is_muted(conn)
+        raw = notifier.mute_until(conn)
+        until = None if (raw is None or raw == notifier.FOREVER) else int(raw)
+        print(notifier.status_line(config.settings.notify, muted, until,
+                                   config.settings.locale))
+        return
+
+    if args.cmd == "account":
+        locale = config.settings.locale
+        if args.which == "next":
+            if not accts.can_omit(config):
+                sys.exit(t("account_only_one"))
+            accts.cycle(conn, config)   # cycle() stores the new state itself
+        elif args.which:
+            try:
+                accts.set_omitted(conn, accts.resolve(config, args.which, locale))
+            except ValueError as e:
+                sys.exit(str(e))
+        omit = accts.effective(conn, config)
+        print(t("account_showing_all") if omit is None
+              else t("account_omitting", account=accts.label(omit, locale)))
+        for account in accts.names(config):
+            mark = "⊘" if account == omit else " "
+            print(f" {mark} {accts.label(account, locale)}")
         return
 
     if args.cmd == "task":
@@ -244,6 +359,14 @@ def main(argv: list[str] | None = None) -> None:
         if not row.short_id:
             sys.exit("sessão sem short_id — stop indisponível (interactive)")
         proc = actions.remote_claude(target, "stop", row.short_id)
+        print(proc.stdout.strip() or proc.stderr.strip())
+        collect(config, conn, force=True)
+    elif args.cmd == "respawn":
+        # restarts a session's process, running or stopped: the answer to a row
+        # that stopped responding, and the way to move one onto a new binary
+        if not row.short_id:
+            sys.exit("sessão sem short_id — respawn indisponível (interactive)")
+        proc = actions.remote_claude(target, "respawn", row.short_id)
         print(proc.stdout.strip() or proc.stderr.strip())
         collect(config, conn, force=True)
     elif args.cmd == "rm":

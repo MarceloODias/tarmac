@@ -19,9 +19,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import accounts
 from . import db as dbm
+from . import notify as notifier
 from .config import Config, Target, tarmac_home
-from .model import WORKING, Session, parse_agents_json
+from .model import BLOCKED, WORKING, Session, parse_agents_json
 
 NEXT_STEPS_REMOTE = "~/.tarmac/next-steps.jsonl"
 
@@ -111,6 +113,19 @@ class TargetResult:
 
 
 def collect_target(target: Target) -> TargetResult:
+    """Never raises.
+
+    The pool re-raises into the caller, so one unforeseen exception here used
+    to take down the whole cycle — every other target included.
+    """
+    try:
+        return _collect_target(target)
+    except Exception as e:
+        return TargetResult(target, None, error=f"{type(e).__name__}: {e}"[:500],
+                            error_kind="error")
+
+
+def _collect_target(target: Target) -> TargetResult:
     cmd = build_command(target)
     try:
         proc = subprocess.run(
@@ -168,35 +183,95 @@ def _record_transition(
     to_state: str,
     at: int,
     uncertain: bool = False,
-) -> None:
-    conn.execute(
+) -> int:
+    """Returns the new row's id — the identity a notification is claimed against."""
+    cur = conn.execute(
         "INSERT INTO transitions (target_id, session_id, from_state, to_state, at, uncertain) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (target_id, session_id, from_state, to_state, at, 1 if uncertain else 0),
     )
+    return int(cur.lastrowid)
 
 
-def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
-    """Mirror one target's collection into the DB, inside one transaction."""
+def record_failure(conn: sqlite3.Connection, t: Target,
+                   error: str | None, kind: str | None) -> None:
+    """Mark one target as failing, with backoff. Rows stay — stale, not gone.
+
+    Reached both from a target that answered badly and from one whose mirroring
+    raised: as far as the panel is concerned those are the same event, a target
+    it could not read this cycle, and both must leave a trace. A failure that
+    writes nothing is what let a broken collect read as a healthy one.
+    """
+    now = dbm.now_ms()
+    row = conn.execute(
+        "SELECT fail_count FROM target_status WHERE target_id = ?", (t.id,)
+    ).fetchone()
+    fails = (row["fail_count"] if row else 0) + 1
+    backoff = BACKOFF_MS[min(fails - 1, len(BACKOFF_MS) - 1)]
+    conn.execute(
+        "INSERT INTO target_status (target_id, last_error, error_kind, fail_count, next_retry_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(target_id) DO UPDATE SET "
+        "last_error = excluded.last_error, error_kind = excluded.error_kind, "
+        "fail_count = excluded.fail_count, next_retry_at = excluded.next_retry_at",
+        (t.id, error, kind, fails, now + backoff),
+    )
+
+
+def _guarded(conn: sqlite3.Connection, name: str, fn):
+    """Run one step of the cycle in its own savepoint; returns (result, error).
+
+    The cycle writes many independent things under a single transaction. Any
+    one of them raising used to discard all of it and escape the process — and
+    a panel that cannot finish a collect keeps drawing its last good frame,
+    which is the one failure a status panel must never have. Now a failing step
+    is rolled back alone and the rest of the cycle — above all `last_collect_at`
+    and the other targets — still lands.
+
+    `name` is a SQL identifier, so it is always a literal at the call site.
+    """
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        out = fn()
+    except Exception as e:
+        conn.execute(f"ROLLBACK TO {name}")
+        conn.execute(f"RELEASE {name}")
+        return None, e
+    conn.execute(f"RELEASE {name}")
+    return out, None
+
+
+def _step(conn: sqlite3.Connection, name: str, fn) -> None:
+    """A guarded step whose failure has no target to be attributed to.
+
+    Nothing in the session list depends on these (mute expiry, next_step
+    enrichment, pruning), so a failure must not stop the cycle — but it does
+    not get to vanish either: silence is what this whole change is about. The
+    error lands in kv, where `tarmac stats` and a DB read can find it.
+    """
+    _, err = _guarded(conn, name, fn)
+    if err is not None:
+        dbm.kv_set(conn, f"last_error:{name}",
+                   f"{dbm.now_ms()} {type(err).__name__}: {err}"[:500])
+
+
+def apply_result(conn: sqlite3.Connection, result: TargetResult,
+                 notify: bool = False) -> list[notifier.BlockedEvent]:
+    """Mirror one target's collection into the DB, inside one transaction.
+
+    Returns the sessions that just entered `blocked` and whose notification
+    this cycle has claimed (SPEC §7.3) — empty unless `notify`. Sending happens
+    after the commit: a claim that is never sent is a lost alert, a send that is
+    never claimed is a duplicate, and duplicates are the worse failure.
+    """
     now = dbm.now_ms()
     t = result.target
+    events: list[notifier.BlockedEvent] = []
 
     if result.sessions is None:
         # isolated failure: keep old data (marked stale by last_ok_at), back off
-        row = conn.execute(
-            "SELECT fail_count FROM target_status WHERE target_id = ?", (t.id,)
-        ).fetchone()
-        fails = (row["fail_count"] if row else 0) + 1
-        backoff = BACKOFF_MS[min(fails - 1, len(BACKOFF_MS) - 1)]
-        conn.execute(
-            "INSERT INTO target_status (target_id, last_error, error_kind, fail_count, next_retry_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(target_id) DO UPDATE SET "
-            "last_error = excluded.last_error, error_kind = excluded.error_kind, "
-            "fail_count = excluded.fail_count, next_retry_at = excluded.next_retry_at",
-            (t.id, result.error, result.error_kind, fails, now + backoff),
-        )
-        return
+        record_failure(conn, t, result.error, result.error_kind)
+        return events
 
     # success: was the target unobservable before this read? (affects blocked_since)
     prev = conn.execute(
@@ -214,6 +289,13 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         (t.id, now),
     )
 
+    # A target seen for the first time (fresh DB, target just added) can hold
+    # several already-blocked sessions. Those are not news, they are the
+    # backlog: notifying would greet a new install with a burst of alerts.
+    cold_start = notify and conn.execute(
+        "SELECT 1 FROM sessions WHERE target_id = ? LIMIT 1", (t.id,)
+    ).fetchone() is None
+
     seen_ids = set()
     for s in result.sessions:
         seen_ids.add(s.session_id)
@@ -225,9 +307,11 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             (t.id, s.session_id),
         ).fetchone()
         first_seen = old["first_seen_at"] if old else now
+        entered_blocked = eff == BLOCKED and (old is None or old["eff_state"] != BLOCKED)
+        transition_id = None
         if old is None:
             # first sighting: record the entry state so blocked_since exists
-            _record_transition(conn, t.id, s.session_id, None, eff, now)
+            transition_id = _record_transition(conn, t.id, s.session_id, None, eff, now)
         elif old["eff_state"] != eff:
             if eff == WORKING:
                 # working again -> whatever the hook summarised at the last end
@@ -236,11 +320,24 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
             # If it changed while we were blind, we do NOT know when: stamp the
             # start of the blind window and mark uncertain (SPEC §4.4 — show >=,
             # never a falsely precise number).
-            _record_transition(
+            transition_id = _record_transition(
                 conn, t.id, s.session_id, old["eff_state"], eff,
                 blind_start if was_blind else now,
                 uncertain=was_blind,
             )
+        # `service` sessions are automation nobody conducts, and `mine: false`
+        # is someone else's box: neither is ever waiting on this keyboard.
+        if (entered_blocked and notify and not cold_start
+                and t.mine and klass != "service" and transition_id is not None):
+            if dbm.claim_notification(conn, transition_id, t.id, s.session_id):
+                events.append(notifier.BlockedEvent(
+                    target_id=t.id,
+                    target_label=t.label,
+                    session_id=s.session_id,
+                    name=s.name or s.session_id[:8],
+                    waiting_for=s.waiting_for,
+                    cwd=s.cwd,
+                ))
         conn.execute(
             "INSERT INTO sessions (target_id, session_id, short_id, uuid, name, kind, state, "
             "  status, waiting_for, cwd, pid, started_at, first_seen_at, last_seen_at, gone, "
@@ -272,6 +369,7 @@ def apply_result(conn: sqlite3.Connection, result: TargetResult) -> None:
         conn.execute(
             "UPDATE sessions SET gone = 1 WHERE target_id = ? AND gone = 0", (t.id,)
         )
+    return events
 
 
 def fetch_next_steps(target: Target) -> list[dict]:
@@ -380,11 +478,19 @@ def apply_next_steps(conn: sqlite3.Connection, target: Target, entries: list[dic
         )
 
 
-def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> list[TargetResult]:
-    """Collect every enabled target in parallel and mirror into the DB."""
+def collect(config: Config, conn: sqlite3.Connection, force: bool = False,
+            local_only: bool = False) -> list[TargetResult]:
+    """Collect every enabled target in parallel and mirror into the DB.
+
+    `local_only` is what a Notification hook fires (`tarmac poke`, SPEC §7.3):
+    the event says a session on THIS machine started waiting, and reading it
+    must not drag every ssh target — with its 15s timeout — along for the ride.
+    """
     now = dbm.now_ms()
     targets = []
-    for t in config.enabled_targets():
+    sources = [t for t in config.enabled_targets()
+               if not local_only or t.transport == "local"]
+    for t in sources:
         if not force:
             row = conn.execute(
                 "SELECT next_retry_at FROM target_status WHERE target_id = ?", (t.id,)
@@ -397,9 +503,30 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
     if targets:
         with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
             results = list(pool.map(collect_target, targets))
+
+    # Decided once, before the transaction: a mute that expires mid-cycle must
+    # not make half the sessions notify and the other half not.
+    notify_on = config.settings.notify and not notifier.is_muted(conn)
+    # An omitted account is silent too (DECISIONS #42): a banner about a row the
+    # panel is hiding is an alert you cannot act on. Read once, same reason.
+    omitted = accounts.effective(conn, config)
+    events: list[notifier.BlockedEvent] = []
     with conn:
+        _step(conn, "expire", lambda: notifier.collect_expired(conn))
         for r in results:
-            apply_result(conn, r)
+            notify_target = notify_on and r.target.account != omitted
+            ev, err = _guarded(
+                conn, "apply", lambda r=r, n=notify_target: apply_result(
+                    conn, r, notify=n)
+            )
+            if err is None:
+                events.extend(ev or [])
+                continue
+            # An internal failure IS the target's failure from where the panel
+            # sits: record it so the rows go stale and loud instead of quietly
+            # keeping the state they had before the bug.
+            _guarded(conn, "apply_failed", lambda r=r, err=err: record_failure(
+                conn, r.target, f"{type(err).__name__}: {err}"[:500], "error"))
         # The next_step queue is per MACHINE, not per target: two config dirs on
         # one box write to the same ~/.tarmac/next-steps.jsonl. Draining it once
         # per target would let the first one swallow the other's entries — so
@@ -409,11 +536,16 @@ def collect(config: Config, conn: sqlite3.Connection, force: bool = False) -> li
             if r.sessions is not None:  # only drain machines we can reach
                 per_machine.setdefault(machine_key(r.target), []).append(r.target)
         for group in per_machine.values():
-            entries = fetch_next_steps(group[0])
-            if entries:
-                route_next_steps(conn, group, entries)
-        dbm.prune_service_sessions(conn)
+            _step(conn, "next_steps", lambda group=group: route_next_steps(
+                conn, group, fetch_next_steps(group[0])))
+        _step(conn, "prune", lambda: (dbm.prune_service_sessions(conn),
+                                      dbm.prune_notifications(conn)))
         dbm.kv_set(conn, "last_collect_at", str(now))
+    # after the commit: osascript is slow and can hang, and holding a write
+    # transaction open across it would block the other renderer's collect
+    if events:
+        notifier.dispatch(events, config.settings.locale,
+                          config.settings.notify_sound)
     return results
 
 

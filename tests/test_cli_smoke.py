@@ -124,14 +124,60 @@ def test_task_lifecycle(cli):
     assert "dividir os rampids" not in cli("task").stdout
 
 
-def test_hook_is_off_by_default_and_installs_with_guards(cli):
-    assert "instalado: False" in cli("hook", "status").stdout
-    out = cli("hook", "install", "--exclude", "/svc", "--max-day", "5").stdout
-    assert "TARMAC_NEXTSTEP_MAX_DAY=5" in out
+def test_hooks_are_off_by_default_and_install_together(cli):
+    status = cli("hook", "status").stdout
+    assert "next-step: instalado: False" in status
+    assert "needs-you: instalado: False" in status
+
+    out = cli("hook", "install", "--exclude", "/svc").stdout
     assert "TARMAC_NEXTSTEP_EXCLUDE=/svc" in out
-    assert "instalado: True" in cli("hook", "status").stdout
+    assert "stop-next-step.sh" in out and "notification-needs-you.sh" in out
+    # the old hook was the one that spent money; nothing here does
+    assert "nenhum dos dois gasta API" in out
+
+    status = cli("hook", "status").stdout
+    assert "next-step: instalado: True" in status
+    assert "needs-you: instalado: True" in status
+
     assert "removido" in cli("hook", "uninstall").stdout
-    assert "instalado: False" in cli("hook", "status").stdout
+    assert "instalado: True" not in cli("hook", "status").stdout
+
+
+def test_installing_one_hook_leaves_the_other_off(cli):
+    cli("hook", "install", "--which", "needs-you")
+    status = cli("hook", "status").stdout
+    assert "needs-you: instalado: True" in status
+    assert "next-step: instalado: False" in status
+
+
+def test_a_legacy_sessionend_hook_is_reported_and_removed(cli, tmp_path):
+    """It is the one that spends: an upgrade must not leave it running."""
+    settings = tmp_path / "fakehome" / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [
+        {"type": "command",
+         "command": 'TARMAC_NEXTSTEP_MAX_DAY=20 "$HOME/.tarmac/session-end-next-step.sh"'}]}]}}))
+    assert "hook ANTIGO" in cli("hook", "status").stdout
+    cli("hook", "install")
+    assert "hook ANTIGO" not in cli("hook", "status").stdout
+    assert "SessionEnd" not in json.loads(settings.read_text())["hooks"]
+
+
+def test_poke_reads_only_the_local_targets(cli):
+    cli("collect", "--force")
+    out = cli("poke").stdout
+    assert "local: ok" in out
+
+
+def test_daemon_status_reaches_the_target(cli):
+    assert "Local" in cli("daemon").stdout
+
+
+def test_respawn_needs_a_background_session(cli):
+    cli("collect", "--force")
+    cli("respawn", "local", "abc12345")
+    interactive = "dddd1111-2222-3333-4444-555566667777"
+    assert cli("respawn", "local", interactive, expect_ok=False).returncode != 0
 
 
 def test_hook_install_preserves_other_settings(cli, tmp_path):
@@ -147,5 +193,100 @@ def test_hook_install_preserves_other_settings(cli, tmp_path):
     assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "outro-script.sh"
     cli("hook", "uninstall")
     data = json.loads(settings.read_text())
-    assert "SessionEnd" not in data["hooks"]
+    assert "Stop" not in data["hooks"]
+    assert "Notification" not in data["hooks"]
     assert "SessionStart" in data["hooks"]
+
+
+@pytest.fixture
+def cli_two_accounts(tmp_path):
+    """The same fake `claude` behind two config dirs: one machine, two accounts.
+
+    A separate fixture from `cli` on purpose — `tarmac account` has nothing to
+    do on a single-account setup, and that case is covered in
+    tests/test_account_filter.py.
+    """
+    home = tmp_path / "tarmac-home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin2"
+    fake_bin.mkdir()
+    # each account answers with its own session, so the panel can be told apart
+    (fake_bin / "claude").write_text("""#!/bin/bash
+case "$*" in *"agents --json"*)
+  if [ "$CLAUDE_CONFIG_DIR" = "$HOME/.claude-personal" ]; then
+    id=pers0001; nome=sessao-pessoal
+  else
+    id=work0001; nome=sessao-de-trabalho
+  fi
+  echo "[{\\"id\\":\\"$id\\",\\"kind\\":\\"background\\",\\"state\\":\\"blocked\\",\\"cwd\\":\\"/proj\\",\\"name\\":\\"$nome\\",\\"startedAt\\":1}]"
+;; *) echo fake ;; esac
+""")
+    (fake_bin / "claude").chmod(0o755)
+    targets = home / "targets.yaml"
+    targets.write_text(
+        "settings:\n  locale: en\ntargets:\n"
+        f"  - id: mac\n    label: Mac\n    mine: true\n    transport: local\n"
+        f"    claude_bin: {fake_bin / 'claude'}\n    config_dir: ~/.claude\n"
+        f"  - id: mac-personal\n    label: Mac\n    account: Personal\n"
+        f"    mine: true\n    transport: local\n"
+        f"    claude_bin: {fake_bin / 'claude'}\n"
+        f"    config_dir: ~/.claude-personal\n"
+    )
+
+    def run(*args, expect_ok=True):
+        (tmp_path / "fakehome2").mkdir(exist_ok=True)
+        env = {
+            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(tmp_path / "fakehome2"),
+            "TARMAC_HOME": str(home),
+            "TARMAC_TARGETS": str(targets),
+        }
+        proc = subprocess.run(
+            [sys.executable, "-m", "tarmac.cli", *args],
+            capture_output=True, text=True, cwd=REPO, env=env, timeout=90,
+        )
+        if expect_ok:
+            assert proc.returncode == 0, (
+                f"`tarmac {' '.join(args)}` falhou ({proc.returncode})\n"
+                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+            )
+        return proc
+
+    return run
+
+
+def test_account_omits_one_account_from_both_renderers(cli_two_accounts):
+    cli = cli_two_accounts
+    assert cli("collect", "--force").stdout.count(": ok") == 2
+    menu = cli("render", "--format", "swiftbar").stdout
+    assert "sessao-de-trabalho" in menu and "sessao-pessoal" in menu
+
+    out = cli("account", "Personal").stdout
+    assert "Omitting Personal" in out
+    assert "⊘ Personal" in out            # and the listing marks which one
+
+    menu = cli("render", "--format", "swiftbar").stdout
+    assert "sessao-pessoal" not in menu, "the omitted account still rendered"
+    assert "sessao-de-trabalho" in menu
+    assert "⊘ Personal" in menu.splitlines()[0], "the badge hid the filter"
+    once = cli("render", "--format", "tui", "--once").stdout
+    assert "sessao-pessoal" not in once and "sessao-de-trabalho" in once
+
+    # a hidden session is still addressable by name (SwiftBar click, scripts)
+    assert cli("pin", "mac-personal", "pers0001").returncode == 0
+
+    assert "Showing all accounts" in cli("account", "all").stdout
+    assert "sessao-pessoal" in cli("render", "--format", "swiftbar").stdout
+
+
+def test_account_next_cycles_and_a_bad_name_fails_loudly(cli_two_accounts):
+    cli = cli_two_accounts
+    cli("collect", "--force")
+    assert "Omitting Personal" in cli("account", "next").stdout
+    assert "Omitting Professional" in cli("account", "next").stdout
+    assert "Showing all accounts" in cli("account", "next").stdout
+    assert "Showing all accounts" in cli("account").stdout   # status only
+
+    bad = cli("account", "Freelance", expect_ok=False)
+    assert bad.returncode != 0
+    assert "unknown account" in (bad.stdout + bad.stderr)

@@ -10,7 +10,19 @@ settings:
   end_of_day_hour: 18     # 'fim do dia' -> 18:00
   service_stuck_min: 30   # service session blocked longer than this raises ⚠
   stale_after_s: 60       # collect_if_stale window
+  stale_data_after_s: 300 # data older than this is not trusted: the target
+                          # reads ⏳ and the badge says so, even when nothing
+                          # reported an error. A collect that dies before it can
+                          # record a failure leaves no error at all, and the
+                          # panel would otherwise draw a frozen frame as a
+                          # healthy one.
   idle_tab_min: 30        # 'close resolved tabs' threshold
+  notify: true            # macOS alert when a session enters NEEDS YOU (SPEC §7.3).
+                          # false = hard off. The day-to-day toggle is `N` in the
+                          # panel / `tarmac notify off`; before a meeting prefer
+                          # `tarmac notify mute 1h`, which switches itself back on.
+  notify_sound: Ping      # macOS sound name (Glass, Hero, Submarine, Tink…).
+                          # '' = notification with no sound.
 
 targets:
   - id: mac-local
@@ -21,7 +33,8 @@ targets:
     config_dir: ~/.claude
 
   # Same machine, alternate account = separate target. `account` is shown as
-  # its own column (blank for the default one), so `label` stays the machine:
+  # its own column (blank for the default one), so `label` stays the machine.
+  # It is also what `A` in the panel (or `tarmac account`) omits from the list:
   # - id: mac-local-alt
   #   label: "Mac"
   #   account: "Personal"
@@ -47,6 +60,19 @@ targets:
       - class: service
         label: "slack-agents"
         match_cwd: "/home/ec2-user/ai-agent-skills/**"
+
+  # A second account on a REMOTE box is a separate target too: a shell function
+  # like `claude-personal() { CLAUDE_CONFIG_DIR=$HOME/.claude-personal claude; }`
+  # creates a session universe that the ~/.claude target cannot see.
+  # - id: ec2-personal
+  #   label: "EC2"
+  #   account: "Personal"
+  #   owner: me
+  #   mine: true
+  #   transport: ssh
+  #   ssh_host: ec2-runner
+  #   claude_bin: /home/ec2-user/.local/bin/claude
+  #   config_dir: ~/.claude-personal
 
   # Someone else's sessions on a shared box (collected as THAT user, via their
   # ssh alias/key — never sudo):

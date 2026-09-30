@@ -76,6 +76,13 @@ def render_view(config: Config, view: View, width: int = 100) -> Group:
             )
         elif tl.state == "error":
             footer.append(f"⚠ {tl.label}: {(tl.last_error or '')[:60]}   ", style="red")
+        elif tl.state == "stale":
+            # no error to report and the data is old anyway: say so where the
+            # eye already goes for target health, not only in the dim timestamp
+            footer.append(
+                f"⏳ {tl.label} · {tr(locale, 'stale_for', ago=format_duration(tl.age_s or 0))}   ",
+                style="yellow",
+            )
     if view.last_collect_ms:
         ago = format_duration(int(time.time() - view.last_collect_ms / 1000))
         footer.append(tr(locale, "updated_ago", ago=ago), style="dim")
